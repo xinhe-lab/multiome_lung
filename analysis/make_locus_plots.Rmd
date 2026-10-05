@@ -1,0 +1,371 @@
+---
+title: "Linking peaks to genes in asthma risk loci"
+output: html_document
+date: '`r Sys.Date()`'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = F, warning = F)
+library(dplyr)
+library(tidyr)
+library(ArchR)
+library(eulerr)
+library(edgeR)
+library(colorRamp2)
+library(scales)
+library(mapgen)
+library(liftOver)
+library(Gviz)
+library(cowplot)
+library(rtracklayer)
+library(colorRamp2)
+library(scales)
+library(htmltools)
+library(ComplexHeatmap)
+set.seed(10)
+addArchRThreads(threads = 16) 
+proj <- loadArchRProject("../output/u19_multiomics/analyses/u19_peaks_tissue")
+ct_order <-
+  c(
+  "Naive_B",
+  "Memory_B",
+  "NK",
+  "CD8_T",
+  "CD8/CD4_T",
+  "CD4_T",
+  "Th17/CD4_T",
+  "Treg"
+)
+ct_order_2 <-
+  c(
+  "Naive_B",
+  "Memory_B",
+  "NK",
+  "CD8_T",
+  "CD4_T",
+  "Th17",
+  "Treg"
+)
+source("../code/track_plots_mapgen.R")
+source("../code/utils_mapgen.R")
+pal_atac <- readRDS("~/projects/Lung_scMultiomics_paper/data/color_codes.RDS")
+pal_atac[6] <- "#E5C100"
+names(pal_atac)[3] <- "memCD4_T"
+pal_rna <- pal_atac[2:8]
+proj@cellColData$PredCellType <- 
+  factor(proj@cellColData$PredCellType,
+         levels = c(ct_order, "Other"))
+gr_peaks_sub <- readRDS("~/projects/lung_scMultiomics/data/asthma_related_CREs_final43.RDS")
+```
+
+# Make locus plots for two highlighted examples
+
+### Gene expression for linked genes
+```{r fig.height = 10, eval = F}
+# obtain gene expression matrix in CPMs across lung immune cells
+rna_counts <- readRDS("~/projects/Lung_scMultiomics_paper/data/pseudobulk_rna_CPM.RDS")
+rna_metadata <- readRDS("~/projects/Lung_scMultiomics_paper/output/u19_multiomics/output/u19_rna/u19_rna_cell_metadata.RDS")
+ct_rna <- c("Naive_B", "Memory_B", "NK", "CD8_T", "CD4_T", "Th17", "Treg")
+rna_counts <- t(rna_counts[rna_metadata$tissue.ident == "lungs", ])
+rna_metadata <- rna_metadata[rna_metadata$tissue.ident == "lungs", ]
+rna_ranges <- promoters(proj@geneAnnotation$genes)
+rna_gr <- GRanges(seqnames = seqnames(rna_ranges),
+                  IRanges(start = start(rna_ranges)-25000,
+                          end = start(rna_ranges)))
+mcols(rna_gr) <- mcols(rna_ranges)
+# group count matrix by pseudo-bulk
+rna_countByCT <-
+  lapply(unique(rna_metadata$CellType), function(i) {
+    rowSums(rna_counts[, rna_metadata$CellType == i])
+    })
+rna_countByCT <- t(do.call(rbind, rna_countByCT))
+colnames(rna_countByCT) <- unique(rna_metadata$CellType)
+metadata <- left_join(
+  data.frame(CellType = colnames(rna_countByCT)),
+  rna_metadata %>% mutate(Sample = core_ID) %>%
+    dplyr::select(CellType, batch, major, Sample, tissue.ident) %>% 
+    distinct(),
+  by = "CellType")
+
+d_rna <- DGEList(counts = rna_countByCT, 
+             remove.zeros = TRUE)
+rna_counts <- cpm(d_rna, normalized.lib.sizes = TRUE, log = TRUE)#FALSE)
+rna_counts <- rna_counts[, colnames(rna_counts) != "Other"]
+```
+```{r}
+rna_counts <- readRDS("~/projects/Lung_scMultiomics_paper/data/lung_RNA_CPM_by_CellType.RDS")
+rna_ranges <- promoters(proj@geneAnnotation$genes)
+rna_gr <- GRanges(seqnames = seqnames(rna_ranges),
+                  IRanges(start = start(rna_ranges)-25000,
+                          end = start(rna_ranges)))
+mcols(rna_gr) <- mcols(rna_ranges)
+# testing gviz's plotTracks()
+features <- c("LRRC32")
+dt2 <- DataTrack(range = rna_gr[which(rna_gr$symbol %in% features)],
+                 data = t(rna_counts[rownames(rna_counts) %in% features,]),
+                 name = "RNA-seq Expression",
+                 genome = "hg38",
+                 type = "histogram", 
+                 stackedBars = FALSE,
+                 groups = factor(colnames(rna_counts), levels = ct_rna))
+
+plotTracks(list(dt2, gat), 
+           #groups = unique(rna_metadata$CellType),
+           from = start(GRanges(region)), 
+           to = end(GRanges(region)), 
+           #type = "histogram", 
+           #stackedBars = FALSE,
+           #groups = factor(rna_colnames, levels = ct_rna),
+           col = pal_atac[match(ct_order, names(pal_atac))][-5])
+```
+
+### Plotting RNA counts across cell types for two genes (LRRC32 & CCR4 & GLB1)
+
+```{r}
+f_rna <-readRDS("../../output/output_dir/remove_dup/pseudobulk_RNA_counts_E2G.RDS")
+# 2. Convert raw pseudobulk counts to CPM
+  rna_counts <- apply(f_rna, 2, function(x) {
+    (x / sum(x)) * 1e6
+  })
+
+# Verify CPM sums to 1 million per sample (column)
+colSums(rna_counts)
+
+toplot = c("LRRC32", "CCR4", "GLB1") # "TNFRSF11A", "ARRDC1", "CEBPA", "DPH7", "SLC7A10")
+metadata <-data.frame(
+  sample = colnames(rna_counts),
+  CellType = unlist(
+    lapply(colnames(rna_counts), function(i) {
+      words = strsplit(i, "_")[[1]][-1]
+      return(paste(words, collapse = "_"))
+      })))
+for(i in 1:length(toplot)){
+  metadata[, toplot[i]] <- data.frame(rna_counts[rownames(rna_counts) %in% toplot[i], ])
+}
+
+metadata$CellType[metadata$CellType == "Th17/CD4_T"] <- "memCD4_T"
+
+ggplot(metadata %>% 
+         pivot_longer(-2:-1, names_to = "Gene",
+                      values_to = "Counts") %>%
+         filter(CellType != "Other") %>%
+         mutate(CellType = factor(CellType, levels = gsub("[.]", "/", ct_order))),
+       aes(y = Counts,
+           x = CellType,
+           fill = CellType)) + 
+  geom_boxplot() + 
+  scale_fill_manual(values = pal_atac[-1]) + 
+  ylab("RNA counts") + 
+  facet_grid(Gene ~ .) + 
+  theme_pub(base_size = 13) + xlab("") + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.6))
+```
+
+
+## Locuszoom plots for specific examples
+
+```{r}
+# prepare RNA expression counts
+multiome_p2g <- readRDS("")
+```
+
+
+
+```{r}
+library(GenomicFeatures) #  Making and manipulating annotations
+library(Gviz) # R package used to visualize track plots
+library(GenomicInteractions) # visualize HiC loops
+library(AnnotationDbi) # match gene ID to gene symbol
+library(org.Hs.eg.db) # match gene ID to gene symbol
+library(mapgen)
+
+f <- readRDS("~/cluster/projects/u19_multiomics/data/coa_gp3_finemapping_gwas_L5.rds")
+f_gr <- GRanges(seqnames = paste0("chr", f$chr),
+                IRanges(start = f$pos,
+                        end = f$pos+1))
+mcols(f_gr) <- f[, -4:-1]
+#liftOver to hg38
+ch=import.chain("~/resources/genomes/chain_files/hg19ToHg38.over.chain")
+seqlevelsStyle(f_gr) <- "UCSC"
+f_hg38_gr<- unlist(liftOver(f_gr, ch))
+f_input <- data.frame(f_hg38_gr) %>%
+  mutate(chr = as.integer(gsub("chr", "", seqnames)),
+         pos = start) %>%
+  dplyr::select(snp, chr, pos, pval, zscore, susie_pip, locus, CS)
+  
+
+finemapstats <- process_finemapping_sumstats(f_input, 
+                                             snp = 'snp', 
+                                             chr = 'chr', 
+                                             pos = 'pos', 
+                                             pip = 'susie_pip', 
+                                             pval = 'pval', 
+                                             zscore = 'zscore', 
+                                             cs = 'CS', 
+                                             locus = 'locus',  
+                                             pip.thresh = 0)
+# force PIPs for SNPs not in a credible set to be zero
+finemapstats$pip[finemapstats$cs == 0] <- 0
+# load gene/transcript tracks
+gtf_file <- '/project2/xinhe/shared_data/gencode/GRCh38/gencode.v21.annotation.gtf.gz'
+genomic.annots <- make_genomic_annots(gtf_file)
+gene.annots <- genomic.annots$genes
+txdb <- loadDb("~/cluster/projects/u19_multiomics/mapgen/gencode.v21.hg38.annotation.gtf.sqlite")
+# load LD reference panel
+bigSNP <- bigsnpr::snp_attach(rdsfile = '/project2/xinhe/1kg/bigsnpr/hg38/EUR_1kg.rds')
+
+# load peak bigwig files
+fpath = "~/cluster/projects/u19_multiomics/analyses/u19_peaks_tissue/GroupBigWigs/CellGroup"
+peak_counts <- list()
+for(i in list.files(fpath)[grepl("Lung", list.files(fpath))]){
+  idx = strsplit(i, "-")[[1]][1]
+  idx = gsub("Lung_", "", idx)
+  peak_counts[[idx]] <- rtracklayer::import(file.path(fpath, i))
+}
+names(peak_counts) <- gsub("/", ".", names(peak_counts))
+
+```
+
+
+```{r, fig.height = 10, fig.width = 9}
+p2g_list <- split(multiome_p2g, multiome_p2g$CellType)
+loops_list <- list()
+for(c in names(p2g_list)){
+  loop_gr <- GRanges(p2g_list[[c]]$ref_gr)
+  names(loop_gr) <- NULL
+  mcols(loop_gr) <- 
+     data.frame(p2g_list[[c]]) %>%
+      dplyr::mutate(score = E2G.Score.qnorm * 10,
+             promoter_start = TargetGeneTSS,
+             promoter_end = promoter_start,
+             gene_name = TargetGene) %>%
+    dplyr::select(promoter_start, promoter_end, gene_name, score)
+  loops_list[[c]] <- loop_gr
+}
+
+loops_full <- lapply(loops_list, process_loop_data)
+
+# LRRC32
+loops_idx <- lapply(loops_full[gsub("/", ".", ct_order[c(1,8,6)])], function(i){
+  match(c(76588363), start(i)) 
+})
+# make some shifts
+#loops_idx$Naive_B[2] = loops_idx$Naive_B[2] - 2
+loops_idx[[2]] = loops_idx[[2]] + 2
+loops_idx[[3]] = loops_idx[[3]] + 1
+loops_col <- lapply(gsub("/", ".", ct_order[c(1,8,6)]), function(i){
+  col = rep("grey", length(loops_full[[i]]))
+  col[as.numeric(loops_idx[[i]])] <- "red"
+  return(col)
+  })
+names(loops_col) <- gsub("/", ".", ct_order[c(1,8,6)])
+
+# CCR4
+loops_idx <- lapply(loops_full[gsub("/", ".", ct_order[6:8])], function(i){
+  match(c(32963768, 33005974), start(i))
+})
+#loops_idx$CD8.CD4_T[2] <- NA
+loops_col <- lapply(gsub("/", ".", ct_order[6:8]), function(i){
+  col = rep("grey", length(loops_full[[i]]))
+  col[as.numeric(loops_idx[[i]])] <- "red"
+  return(col)
+  })
+names(loops_col) <- gsub("/", ".", ct_order[6:8])
+
+# TNFSF4
+loops_idx <- lapply(loops_full[gsub("/", ".", ct_order[c(1,2)])], function(i){
+  match(173202304, start(i))
+})
+
+loops_col <- lapply(gsub("/", ".", ct_order[c(1,2)]), function(i){
+  col = rep("grey", length(loops_full[[i]]))
+  col[as.numeric(loops_idx[[i]])] <- "red"
+  return(col)
+  })
+names(loops_col) <- gsub("/", ".", ct_order[c(1,2)])
+
+peak_x10 <- lapply(peak_counts, function(i){
+  mcols(i)$score <- mcols(i)$score * 10
+  return(i)})
+names(peak_x10)[8] <- "memCD4_T"
+
+selected_genes <- c("CCR4")# "TCF7", "CCL20", "LRRC32", "CCR4")
+loci_idx <- which(gr_peaks_sub$nearestGene %in% selected_genes)
+pdf("data/plots/CCR4_locusplot2.pdf", width = 130/25.4, height = 160/25.4)
+#par(mfrow = c(2, 1))
+for(i in loci_idx[1]){
+  #ct = gsub("/", ".", topCellType)[i]
+  #loops <- list(p2g = process_loop_data(loops_list[[ct]]))
+  focal_gr <- gr_peaks_sub[i]
+  track_plot(finemapstats,
+             #region = as.character(gr_peaks_sub[loci_idx] + 20000),
+               #"chr9:137556174-137656674",
+             # region = "chr11:76580000-76678500",
+             "chr3:32940000-33020000",
+             #"chr1:173200000-173302804",
+             #"chr5:134050000-134160000",
+             gene.annots,
+             txdb = txdb,
+             counts = peak_x10[gsub("/", ".", ct_order)],
+             rna.gr = rna_gr,
+             rna.counts = rna_counts,
+             genes = "LRRC32", #"LRRC32", #c("CCR4"), 
+             filter_protein_coding_genes = TRUE,
+             color_piptrack_by = "cs",
+             #counts.ylim = c(0, 1),
+             loops = loops_full[gsub("/", ".", ct_order[6:8])], #ct_order[5:8])]
+             genome = "hg38",
+             bigSNP = bigSNP,
+             #filter_loop_genes = c("CCR4"),
+             highlight_snps = c("rs6795737", "rs35570272"), #c("rs55646091"),#, #c("rs55646091","rs10899240"),#"topSNP"
+             counts.color = pal_atac[-1][gsub("[.]", "/", ct_order)],
+             rna.color = pal_atac[match(gsub("[.]", "/", ct_order), names(pal_atac))][-5],
+             #peaks.color = c("black", "navy", "blue"),
+             loops.color = loops_col,
+             genelabel.side = "right",
+             rotation.title = 90,
+             track.sizes = c(0.35, 
+                             0.35, 
+                             rep(0.1, length(peak_counts)-1),
+                             0.3, 
+                             rep(0.15, length(loops_full[1:3])),
+                             #0.25,
+                             0.2),
+             verbose = TRUE)
+}
+dev.off()
+```
+
+
+```{r}
+ggsave("plots/.pdf",
+       z,
+       width = 180/25.4, height = 215/25.4,#110/25.4,
+       units = "in", dpi = 300)
+```
+
+
+
+
+```{r, eval = F}
+# Literature search:
+# 
+# The ligand-receptor pair CCL20-CCR6 is responsible for the chemotaxis of dendritic cells (DC), effector/memory T-cells and B-cells and plays an important role at skin and mucosal surfaces under homeostatic and inflammatory conditions, as well as in pathology, including cancer and various autoimmune diseases (PubMed:21376174).
+# `
+# CXCR5 is a protein receptor, a C-X-C chemokine receptor type 5, that plays a crucial role in immune cell trafficking and development, particularly in B and T cell lymphocytes. It is involved in B cell homing, T follicular helper (Tfh) cell development, and the formation of germinal centers in secondary lymphoid organs. CXCR5 is a key receptor for the chemokine CXCL13. 
+# 
+# EMSY is a human protein encoded by the EMSY gene. It's a chromatin remodeler that promotes a BRCAness phenotype by regulating homologous recombination repair (HRR). EMSY also suppresses the type I interferon response and innate immunity. 
+# 
+# TLR10 is a functional receptor expressed by B cells and plasmacytoid dendritic cells. It plays a role in regulating immune responses, particularly in suppressing pro-inflammatory signaling pathways. It potentially suppresses the activation of NF-κB and MAPK pathways. 
+# 
+# TBX21, also known as T-bet, is a gene that encodes a T-box transcription factor involved in the immune system, particularly in the development and function of Th1 cells. It plays a role in both innate and adaptive immunity, including T-cell homing to pro-inflammatory sites. TBX21 is also implicated in various diseases, including asthma and Alzheimer's disease. 
+# 
+# CCR4 is a protein, specifically a C-C chemokine receptor, that plays a role in the immune system. It's expressed on various T cell subsets, including Th2, Treg, and Th17 cells. CCR4 is also involved in recruiting these T cells to different tissues, including the skin and tumor microenvironments.
+# 
+# PRKCQ encodes protein kinase C theta (PKC-θ), a protein involved in T-cell signaling and immune responses. It is a member of the serine/threonine kinases family and is primarily expressed in hematopoietic cells, particularly T lymphocytes and platelets. PKC-θ plays a crucial role in T-cell activation, proliferation, and differentiation, and its activity is essential for downstream signaling pathways. 
+```
+
+
+
+
+
