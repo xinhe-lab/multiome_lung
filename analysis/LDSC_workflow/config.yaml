@@ -1,0 +1,59 @@
+raw_gwas: /path to raw GWAS summary statistics/
+gwas_dir: /path to formatted GWAS summary statistics/
+models:
+    baseline_v1.2: baseline.
+    # baselineLD_v2.2: baselineLD.
+samples:
+    height: bmi_height_2018/Height_meta_analysis_Wood_et_al_and_UKBiobank_2018.txt.gz
+    bmi: bmi_height_2018/BMI_meta_analysis_Locke_et_al_and_UKBiobank_2018_UPDATED.txt.gz
+    IPF: IPF.sumstats.gz
+    COPD: COPD.sumstats.gz
+    AtopicDermatitis: AtopicDermatitis.sumstats.gz
+    allergy: allergy_2017/SHARE-without23andMe.LDSCORE-GC.SE-META.v0.gz
+    AllergicRhinitis: AllergicRhinitis.sumstats.gz
+    coa_ukb: coa_ukb.sumstats.gz
+    aoa_ukb: aoa_ukb.sumstats.gz
+    COVID19: COVID19.sumstats.gz
+ features:
+    Lung_CD4_T: u19_multiomics/joint_set/Lung_CD4_T.bed
+    Lung_CD8_T: u19_multiomics/joint_set/Lung_CD8_T.bed
+    Lung_T: u19_multiomics/joint_set/Lung_T.bed
+    Lung_B: u19_multiomics/joint_set/Lung_B.bed
+    Lung_NK: u19_multiomics/joint_set/Lung_B.bed
+    Lung_Memory_B: u19_multiomics/joint_set/Lung_Memory_B.bed
+    Lung_Naive_B: u19_multiomics/joint_set/Lung_Naive_B.bed
+    Lung_Other: u19_multiomics/joint_set/Lung_Other.bed
+    Lung_NK: u19_multiomics/joint_set/Lung_NK.bed
+    Lung_CD8.CD4_T: u19_multiomics/joint_set/Lung_CD8.CD4_T.bed
+    Lung_Th17_T: u19_multiomics/joint_set/Lung_Th17.CD4_T.bed
+    Lung_Treg_T: u19_multiomics/joint_set/Lung_Treg.bed
+    scBlood_T: Benaglio2023/scBlood_T.bed
+    scBlood_B: Benaglio2023/scBlood_B.bed
+    scBlood_NK: Benaglio2023/scBlood_NK.bed
+    Lung_E2G_T: u19_multiomics/e2g_links/merged_T.bed
+    Lung_E2G_B: u19_multiomics/e2g_links/merged_B.bed
+    Lung_E2G_NK: u19_multiomics/e2g_links/merged_NK.bed
+    lung_blood_merge: u19_multiomics/joint_set/Lung_Blood_merge.bed
+    blood_merge: u19_multiomics/joint_set/Lung_merge.bed
+    lung_merge: u19_multiomics/joint_set/Blood_merge.bed
+annotations:
+    Lung_E2G_T: Lung_E2G_T/Lung_E2G_T.
+    Lung_E2G_B: Lung_E2G_B/Lung_E2G_B.
+    Lung_E2G_NK: Lung_E2G_NK/Lung_E2G_NK.
+    Lung_T: Lung_T/Lung_T.
+    Lung_B: Lung_B/Lung_B.
+    Lung_NK: Lung_NK/Lung_NK.
+    scBlood_T: scBlood_T/scBlood_T.
+    scBlood_B: scBlood_B/scBlood_B.
+    scBlood_NK: scBlood_NK/scBlood_NK.
+    Joint_ct_CD8T: lung_blood_merge/lung_blood_merge.,Lung_CD8_T/Lung_CD8_T.
+    Joint_ct_CD4T: lung_blood_merge/lung_blood_merge.,Lung_CD4_T/Lung_CD4_T.
+    Joint_ct_Treg: lung_blood_merge/lung_blood_merge.,Lung_Treg_T/Lung_Treg_T.
+    Joint_ct_MemB: lung_blood_merge/lung_blood_merge.,Lung_Memory_B/Lung_Memory_B.
+    Joint_ct_NaiveB: lung_blood_merge/lung_blood_merge.,Lung_Naive_B/Lung_Naive_B.
+    Joint_ct_Th17: lung_blood_merge/lung_blood_merge.,Lung_Th17_T/Lung_Th17_T.
+    Joint_ct_CD8.CD4T: lung_blood_merge/lung_blood_merge.,Lung_CD8.CD4_T/Lung_CD8.CD4_T.
+    Joint_ct_NK: lung_blood_merge/lung_blood_merge.,Lung_NK/Lung_NK.
+    Joint_2T: Lung_T/Lung_T.,scBlood_T/scBlood_T.
+    Joint_2B: Lung_B/Lung_B.,scBlood_B/scBlood_B.
+    Joint_2NK: Lung_NK/Lung_NK.,scBlood_NK/scBlood_NK.

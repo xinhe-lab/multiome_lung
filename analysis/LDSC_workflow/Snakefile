@@ -1,0 +1,127 @@
+configfile:"config.yaml"
+
+def get_bed_files(wildcards):
+  """
+  Return the path for bed files
+  """
+  return bed_dir +"/"+config["features"][wildcards.feature]
+  
+def get_annot_files(wildcards):
+  """
+  Return the path for annotation files
+  """
+  return ldsc_dir +"/"+config["features"][wildcards.feature]
+
+def make_annot_sets(wildcards):
+  """
+  Return a string of baseline and one focal annotation separate by comma
+  """
+  baseline = f"{ldsc_base}/1000G_Phase3_{wildcards.model}_ldscores/" + \
+                 config["models"][wildcards.model] 
+  feature = f"{ldsc_dir}/{wildcards.feature}/{wildcards.feature}."
+  return("%s" % ",".join([baseline, feature]))
+    
+def make_joint_annot_sets(wildcards):
+  """
+  Return a string of baseline and a set of annotations separate by comma
+  """
+  l=[f"{ldsc_dir}/{i}" for i in config["annotations"][wildcards.annotation].split(",")]
+  baseline = f"{ldsc_base}/1000G_Phase3_{wildcards.model}_ldscores/" + \
+               config["models"][wildcards.model] 
+  return("%s" % ",".join([baseline] + l))
+    
+print(make_annot_sets)
+
+bed_dir="/path to bed files/"
+ldsc_github="path to the LDSC github repository"
+ldsc_dir="/path to LDSC inputs"
+ldsc_base="/path to LDSC baseline annotations"
+ldsc_out="/path to LDSC outputs"
+chroms=[str(i) for i in range(1,23)]
+
+localrules: build_binary_annotations
+ruleorder:  run_joint_regression > run_regression
+
+rule all: 
+    input:
+        expand(ldsc_out+"/{sample}/{model}/{feature}.results", sample=config["samples"], model=config["models"], feature=config["features"]),
+        expand(ldsc_out + "/{sample}/{model}/{annotation}.results", sample=config["samples"], model=config["models"], annotation=config["annotations"]),
+        expand(ldsc_dir + "/{feature}/{feature}.{chrom}.l2.ldscore.gz", feature=config["features"], chrom=chroms),
+        expand(ldsc_dir + "/{feature}/{feature}.{chrom}.annot.gz", feature=config["features"],
+                                            chrom=chroms)    
+                                            
+
+rule build_binary_annotations:
+    input:
+        get_bed_files
+    output:
+        ldsc_dir+"/{feature}/{feature}.{chrom}.annot.gz"
+    conda:
+        "environment.yml"
+    shell:
+        "python ~/github/ldsc/make_annot.py \
+              --bed-file {input} \
+              --bimfile {ldsc_base}/1000G_EUR_Phase3_plink/1000G.EUR.QC.{wildcards.chrom}.bim \
+              --annot-file {output}"
+
+
+rule compute_LD_scores:
+    input:
+        ldsc_dir+"/{feature}/{feature}.{chrom}.annot.gz"
+    output:
+        ldsc_dir+"/{feature}/{feature}.{chrom}.l2.ldscore.gz"
+    conda:
+        "environment.yml"
+    shell:
+        "python {ldsc_github}/ldsc.py \
+                --l2 \
+                --thin-annot \
+                --ld-wind-cm 1 \
+                --chunk-size 10000 \
+                --bfile {ldsc_base}/1000G_EUR_Phase3_plink/1000G.EUR.QC.{wildcards.chrom} \
+                --print-snps {ldsc_base}/listHM3.txt \
+                --annot {input} \
+                --out {ldsc_dir}/{wildcards.feature}/{wildcards.feature}.{wildcards.chrom}"
+
+
+# Run the above steps at local node 
+rule run_regression:
+    input:
+        "/path to GWAS summary statistics/{sample}.sumstats.gz"
+    output:
+        ldsc_out+"/{sample}/{model}/{feature}.results"
+    params:
+        make_annot_sets
+    conda:
+        "environment.yml"
+    shell:
+        "python {ldsc_github}/ldsc.py \
+                --h2 {input} \
+                --ref-ld-chr {params} \
+                --overlap-annot \
+                --print-coefficients \
+                --print-delete-vals \
+                --frqfile-chr {ldsc_base}/1000G_Phase3_frq/1000G.EUR.QC. \
+                --w-ld-chr {ldsc_base}/1000G_Phase3_weights_hm3_no_MHC/weights.hm3_noMHC. \
+                --out {ldsc_out}/{wildcards.sample}/{wildcards.model}/{wildcards.feature}"
+                
+
+rule run_joint_regression:
+    input:
+        "/path to GWAS summary statistics/{sample}.sumstats.gz"
+    output:
+        ldsc_out+"/{sample}/{model}/{annotation}.results"
+    conda:
+        "environment.yml"
+    params:
+        make_joint_annot_sets
+    shell:
+        "python {ldsc_github}/ldsc.py \
+                --h2 {input} \
+                --ref-ld-chr {params} \
+                --overlap-annot \
+                --print-coefficients \
+                --print-delete-vals \
+                --frqfile-chr {ldsc_base}/1000G_Phase3_frq/1000G.EUR.QC. \
+                --w-ld-chr {ldsc_base}/1000G_Phase3_weights_hm3_no_MHC/weights.hm3_noMHC. \
+                --out {ldsc_out}/{wildcards.sample}/{wildcards.model}/{wildcards.annotation}"
