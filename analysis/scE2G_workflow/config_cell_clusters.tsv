@@ -1,0 +1,9 @@
+cluster	rna_matrix_file	atac_frag_file	HiC_file	HiC_type	HiC_resolution	alt_TSS	alt_genes	model_dir
+Naive_B	resources/u19_multiome/rna_count_matrix.csv.gz	resources/u19_multiome/Naive_B/atac_fragments.tsv.gz						models/multiome_powerlaw_v3,models/scATAC_powerlaw_v3
+Memory_B	resources/u19_multiome/rna_count_matrix.csv.gz	resources/u19_multiome/Memory_B/atac_fragments.tsv.gz						models/multiome_powerlaw_v3,models/scATAC_powerlaw_v3
+NK	resources/u19_multiome/rna_count_matrix.csv.gz	resources/u19_multiome/NK/atac_fragments.tsv.gz						models/multiome_powerlaw_v3,models/scATAC_powerlaw_v3
+CD8_T	resources/u19_multiome/rna_count_matrix.csv.gz	resources/u19_multiome/CD8_T/atac_fragments.tsv.gz						models/multiome_powerlaw_v3,models/scATAC_powerlaw_v3
+CD8.CD4_T	resources/u19_multiome/rna_count_matrix.csv.gz	resources/u19_multiome/CD8.CD4_T/atac_fragments.tsv.gz						models/multiome_powerlaw_v3,models/scATAC_powerlaw_v3
+CD4_T	resources/u19_multiome/rna_count_matrix.csv.gz	resources/u19_multiome/CD4_T/atac_fragments.tsv.gz						models/multiome_powerlaw_v3,models/scATAC_powerlaw_v3
+memCD4_T	resources/u19_multiome/rna_count_matrix.csv.gz	resources/u19_multiome/memCD4_T/atac_fragments.tsv.gz						models/multiome_powerlaw_v3,models/scATAC_powerlaw_v3
+Treg	resources/u19_multiome/rna_count_matrix.csv.gz	resources/u19_multiome/Treg/atac_fragments.tsv.gz						models/multiome_powerlaw_v3,models/scATAC_powerlaw_v3
