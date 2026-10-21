@@ -1,0 +1,696 @@
+---
+title: "Validate cell types with ATAC-seq"
+output:
+  html_document: default
+  word_document: default
+  pdf_document: default
+date: '`r Sys.Date()`'
+author: 'Jing Gu'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE)
+library(dplyr)
+library(ArchR)
+library(liftOver)
+library(eulerr)
+library(ggrepel)
+library(cowplot)
+library(purrr)
+library(tidyr)
+library(BSgenome.Hsapiens.UCSC.hg38)
+work.dir<-"output"
+set.seed(10)
+proj <- loadArchRProject("output/u19_peaks_tissue")
+ct_order <-
+  c(
+  "CD8/CD4_T",
+  "Naive_B",
+  "Memory_B",
+  "NK",
+  "CD8_T",
+  "CD4_T",
+  "Th17/CD4_T",
+  "Treg",
+  "Other"
+)
+ct_order2 <-
+  c(
+  "Naive_B",
+  "Memory_B",
+  "NK",
+  "CD8_T",
+  "CD8/CD4_T",
+  "CD4_T",
+  "Th17/CD4_T",
+  "Treg")
+toshow_ct <-
+  c("Naive_B",
+  "Memory_B",
+  "NK",
+  "CD8_T",
+  "CD8/CD4_T",
+  "CD4_T",
+  "memCD4_T",
+  "Treg",
+  "Other")
+
+proj@cellColData$PredCellType <-
+  factor(
+    proj@cellColData$PredCellType,
+    levels = c(ct_order2,"Other"),
+    labels = toshow_ct)
+
+pal_atac <- readRDS("data/color_codes.RDS")
+names(pal_atac)[3] <- "memCD4_T"
+#pal_atac[4] <- "#74c476"
+#names(pal_atac)[c(3,4)] <- c("naiCD4_T", "memCD4_T")
+source("code/make_plots.R")
+
+pal_rna <- pal_atac
+names(pal_rna)[3:4] <- c("memCD4_T", "naiCD4_T")
+pal_rna[3:4] = c("#208A42", "#74c476")
+```
+
+# Sample QCs for scATAC-seq datasets
+
+## UMAP clustering for RNA-seq and ATAC-seq
+```{r}
+p3<-plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "PredCellType", embedding = "UMAP", pal = pal_atac, labelMeans = FALSE) + theme_ArchR(legendTextSize = 15) + theme(legend.position = "none")
+p4<-plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Tissue", embedding = "UMAP", labelMeans = FALSE) + theme(legend.position = "none")
+
+```
+
+```{r}
+seRNA <- readRDS("~/cluster/projects/u19_multiomics/analyses/remove_dup/lungs_spleens_integrated_subSCE.RDS") 
+colData(seRNA)$CellType <- factor(
+    colData(seRNA)$CellType,
+    levels = 
+            c("Other", "Treg", "memCD4_T", "naiCD4_T",
+              "CD8_T", "NK", "Memory_B", "Naive_B"))
+pal <- paletteDiscrete(values = colData(seRNA)$CellType)
+rm(seRNA)
+```
+COB-5 sample has a small cluster of cells with low number of fragments, so top 5K cells ranked by number of fragments were retained. As a result, we see more consistent distribution from the rigid plots of TSS enrichment and log10 of number of fragments across samples. 
+```{r message = F}
+p1 <- plotGroups(
+    ArchRProj = proj, 
+    groupBy = "Sample", 
+    colorBy = "cellColData", 
+    name = "TSSEnrichment",
+  plotAs = "ridges",
+    baseSize = 12
+)
+
+p2 <- plotGroups(
+    ArchRProj = proj, 
+    groupBy = "Sample", 
+    colorBy = "cellColData", 
+  name = "log10(nFrags)",
+  plotAs = "ridges",
+    baseSize = 12
+)
+
+ggAlignPlots(p1, p2, type = "h") 
+```
+
+Ridge plots for TSS enrichment and log10(nFrags) across samples show a relatively consistent distribution.
+```{r eval = F}
+#too slow
+proj@cellColData$Sample <- 
+  factor(proj@cellColData$Sample,
+         labels)
+p3 <- plotFragmentSizes(ArchRProj = proj)
+p4 <- plotTSSEnrichment(ArchRProj = proj)
+ggAlignPlots(p3, p4, type = "h")
+```
+
+Clustering of ATAC-seq data shows no strong bias to one batch or one sample.
+
+```{r message = F, fig.width = 8}
+proj@cellColData$Batch <- ifelse(grepl("SMO", proj@cellColData$Sample), "1", "0")
+p1<-plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Batch", embedding = "UMAP") + theme_ArchR(legendTextSize = 15)
+p2<-plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Tissue", embedding = "UMAP") + 
+  theme_ArchR(legendTextSize = 15)
+p3<-plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Status", embedding = "UMAP") + 
+  theme_ArchR(legendTextSize = 15)
+p4<-plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Sample", embedding = "UMAP", ) + 
+  theme_ArchR(legendTextSize = 15)
+ggAlignPlots(p1, p4, type = "h")
+```
+
+Clustering of ATAC-seq data also shows no distinct clusters for either tissue or disease status.
+
+```{r, message = F, fig.width = 8}
+ggAlignPlots(p2, p3, type = "h")
+```
+
+# Annotate clusters of scATAC-seq data with majority voting
+
+Majority of clusters were dominated by one single cell type from matched RNA-seq, while two clusters show some ambiguity and so labeled as "CD8/CD4_T" and "Th17/CD4_T".
+
+```{r, message = F, fig.width = 9, fig.height = 6}
+proj@cellColData$PredCellType <-
+  factor(proj@cellColData$PredCellType,
+         levels = rev(toshow_ct))
+pal_atac <- paletteDiscrete(values = proj@cellColData$PredCellType)
+
+plotEmbedding(ArchRProj = proj, colorBy = "cellColData", 
+              name = "Clusters", embedding = "UMAP") + 
+ theme_ArchR(legendTextSize = 15, legendPosition = "none")
+
+atac_meta <- readRDS("../output/atac_meta_integration.RDS")
+gginput <- data.frame(table(atac_meta$Clusters, atac_meta$RNALabels),
+                      colnames = c("Clusters", "Count"))
+
+p1 <-
+ggplot(atac_meta,
+       aes(x = factor(Clusters, levels = paste0("C", 1:length(unique(Clusters)))),
+           fill = RNALabels)) + 
+  geom_bar() + 
+  xlab("Clusters") + ylab("Count") + 
+  scale_fill_manual(values = pal_rna) + 
+  labs(fill = "RNA-seq labels") + 
+  theme_pub(base_size = 12) + theme(legend.position = "bottom")
+
+p2 <- 
+  ggplot(unique(atac_meta[, c("Clusters", "SimilarityScore")]),
+         aes(x = factor(Clusters, levels = paste0("C", 1:length(unique(Clusters)))),
+             y = SimilarityScore)) + 
+  geom_col() + 
+  xlab("") + ylab("Jaccard index") +
+  theme_pub(base_size = 12)
+
+plot_grid(p1, p2, ncol =1, rel_heights  = c(2, 1))
+
+```
+
+```{r}
+rnaLabels <- levels(factor(atac_meta_updated$FilteredCellType))
+majorityVoting <- 
+  atac_meta_updated %>% 
+    group_by(Clusters) %>%
+      summarise(CellType = rnaLabels[which.max(table(FilteredCellType))])
+
+atac_meta$CellType <- majorityVoting$CellType[match(atac_meta$Clusters, majorityVoting$Clusters)]
+```
+
+Comparison of UMAPs before or after majority-voting
+
+* left plot - cell labels before majority-voting
+
+* right plot - cell labels after majority-voting
+```{r, message = F, fig.width = 8}
+pal <- paletteDiscrete(values = colData(seRNA)$CellType)
+p1 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", 
+              name = "CellType", embedding = "UMAP",
+              pal=pal) + theme_ArchR(legendPosition = "none")
+p2 <-plotEmbedding(ArchRProj = proj, colorBy = "cellColData", 
+              name = "PredCellType", embedding = "UMAP",
+              pal = pal_atac, baseSize = 15) + 
+  theme_ArchR(legendPosition = "bottom", legendTextSize = 7)
+
+```
+
+### Cell composition across samples
+
+```{r, eval = F}
+metadata <- proj@cellColData
+metadata$core_ID <- metadata$Sample
+metadata <- left_join(data.frame(metadata), sample_cov[, c("ROBI", "core_ID")])
+metadata$SampleID <- paste0(metadata$Tissue, "_", 
+                            factor(metadata$ROBI, 
+                                   labels = c(1, 4, 3, 5, 6, 7, 2, 8, 9)))
+metadata$PredCellType <- factor(metadata$PredCellType,
+                                levels = rev(names(pal_atac)))
+metadata$predictedGroup_Un <- factor(
+  metadata$predictedGroup_Un,
+  labels = c("NK", "NK", "Other", "Other",
+             "Other", "Memory_B", "Naive_B",
+             "Treg", "CD4_T", "CD8_T", "Th17") 
+)
+metadata$predictedGroup_Un <- factor(metadata$predictedGroup_Un,
+                                levels = rev(names(pal)))
+```
+
+```{r, fig.height = 8, fig.width = 8}
+metadata <- readRDS("~/projects/Lung_scMultiomics_paper/data/u19_full_atac_cell_metadata.RDS")
+p <-
+  ggplot(metadata %>% dplyr::filter(SampleID != "Spleen_8") %>%
+         mutate(SampleID = factor(SampleID,
+                                  levels = c(paste0("Lung_", c(1:4,6,8,5,7,9)),
+                                             paste0("Spleen_", c(1:3,6,7,9))),
+                                  labels = c(paste0("L", c(1:4,6,8)),
+                                             paste0("L",c(5,7,9)),
+                                              paste0("S", c(1:3,6)),
+                                             paste0("S", c(7,9))))),
+       aes(x = SampleID,
+           fill = factor(PredCellType,
+                         levels = toshow_ct))) + 
+  geom_bar(position = "fill") + 
+  scale_fill_manual(values = pal_atac) + 
+  ylab("Cell proportion") + xlab("") + 
+  #guides(fill = guide_legend(title = "CellType")) + 
+  theme_ArchR(baseSize = 12, xText90 = TRUE, legendPosition = "none")
+  #facet_grid(~ Status) + 
+  #ggtitle("Cell composition across samples")
+```
+
+# Different analyses for validating cell type annotations
+
+## Gene activity scores
+
+Marker genes show high gene scores computed from nearby ATAC-seq peaks for the corresponding cluster
+
+```{r}
+markerGenes  <- c(
+ c("MS4A1", "GNLY", "CD8B", "LEF1", "IL7R", "FOXP3")
+  )
+
+p <- plotEmbedding(
+    ArchRProj = proj, 
+    colorBy = "GeneScoreMatrix", 
+    name = markerGenes, 
+    embedding = "UMAP",
+    quantCut = c(0.01, 0.95),
+    imputeWeights = getImputeWeights(proj)
+)
+```
+
+```{r}
+#Rearrange for grid plotting
+p2 <- lapply(p, function(x){
+    x + guides(color = FALSE, fill = FALSE) + 
+    #theme_ArchR(baseSize = 12) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        plot.title = element_text(size = 18),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+    ) + ggtitle(strsplit(x$labels$title, ":")[[1]][2])
+})
+pdf("~/projects/lung_scMultiomics/data/plots/gene_activity_UMAP.pdf", width = 10)
+do.call(cowplot::plot_grid, c(list(ncol = 3),p2))
+dev.off()
+```
+```{r}
+plotPDF(plotList = p, 
+    name = "Plot-UMAP-Marker-Genes-W-Imputation-Review2pdf", 
+    ArchRProj = proj, 
+    addDOC = FALSE, width = 5, height = 5)
+```
+
+
+## Comparing majority voting vs. RNA label transferring
+
+Most of the clusters were annotated similarly using both majority voting or label transferring approaches. For the ambiguous clusters, results from label transferring show C16 was mostly Th17 and C14 was mixture of CD8/CD4_T cells. This is due to imperfect clustering or heterogeneity at chromatin levels for cells in those clusters.
+
+```{r, fig.width = 10}
+proj@cellColData$LabelTransfer <- 
+  factor(metadata$predictedGroup_Un,
+         levels = rev(names(pal)))
+p1 <- 
+  ggplot(proj@cellColData,
+         aes(x = Clusters,
+             fill = CellType)) + 
+    geom_bar() + 
+    #scale_fill_manual(values = pal) + 
+    theme_classic(base_size = 12)  + 
+    ggtitle("Cells partially annotated by integrative approach")
+p2 <-   
+ggplot(proj@cellColData,
+       aes(x = Clusters,
+           fill = LabelTransfer)) + 
+  geom_bar() + 
+  #scale_fill_manual(values = pal) + 
+  theme_classic(base_size = 12) + 
+  ggtitle("Cells annotated by label transferring")
+
+proj@cellColData$SingleTissue <- 
+  factor(proj@cellColData$SingleTissue,
+         labels = c("Memory_B", "NK", "NK", "Other", "Other", "Other",
+                    "Memory_B", "Naive_B", "Other", "Treg", "CD4_T",
+                    "CD8_T", "Th17"))
+# Corrected lung cluster 4 to be CD4 T cells
+proj@cellColData$correctLabs <- proj@cellColData$CellType
+proj@cellColData$correctLabs[which(proj@cellColData$Tissue == "Lung" & proj@cellColData$SeuratCluster == "4")] <- "CD4_T"
+
+p3 <-   
+ggplot(proj@cellColData,
+       aes(x = Clusters,
+           fill = factor(SingleTissue, 
+                         levels = levels(factor(proj@cellColData$CellType))))) + 
+  geom_bar() + labs(fill = "CellType") + 
+  #scale_fill_manual(values = pal) + 
+  theme_classic(base_size = 12) + 
+  ggtitle("Cells partially annotated by single-tissue approach")
+
+p4 <-   
+ggplot(proj@cellColData,
+       aes(x = Clusters,
+           fill = correctLabs)) + 
+  geom_bar() + 
+  scale_fill_manual(values = pal) + 
+  theme_classic(base_size = 12) + 
+  ggtitle("Cells annotated by correct labels")
+
+p5 <-   
+ggplot(proj@cellColData,
+       aes(x = Clusters,
+           fill = correctTransfer)) + 
+  geom_bar() + 
+  scale_fill_manual(values = pal) + 
+  theme_classic(base_size = 12) + 
+  ggtitle("Cells annotated by Transferred labels")
+
+ggAlignPlots(p4, p5, type = "v")
+```
+
+### Comparing cell labels from two approaches with Jaccard Index
+```{r, fig.width = 12, fig.height = 4}
+jaccard <- function(a, b) {
+    a <- as.character(a)
+    b <- as.character(b)
+    intersection = sum(a == b, na.rm = TRUE)
+    union = length(a) + length(b) - intersection
+    return (c(intersection, union, intersection/union))
+}
+
+by_cluster <-
+  unlist(lapply(split(atac_meta, atac_meta$Clusters), function(i){
+    return(jaccard(i$CellType, i$predictedGroup3_Un)[3])
+  }))
+
+atac_meta$SimilarityScore <- by_cluster[match(atac_meta$Clusters,names(by_cluster))]
+
+
+LabelTransfer <- data.frame(Clusters = clustersDF$Clusters, 
+                            CellType = clustersDF$LabelTransfer) 
+LabelTransfer <-
+  sapply(split(LabelTransfer, LabelTransfer$Clusters), function(i) {
+    df = data.frame(table(i))
+    return(df$CellType[which.max(df$Freq)])
+  })
+LabelTransfer <- data.frame(Clusters = names(LabelTransfer), LabelTransfer)
+MajorityVote <- data.frame(Clusters = clustersDF$Clusters, 
+                            CellType = clustersDF$MajorityVote) %>% distinct()
+
+joint_tbl <- left_join(LabelTransfer, MajorityVote, by = "Clusters")
+sum(as.character(joint_tbl$LabelTransfer) == as.character(joint_tbl$CellType))
+```
+
+## Track plots for all peaks near TSS of each marker gene 
+
+```{r message = F, eval = F}
+library(locuszoomr)
+library(glue)
+gene <- c("CD19", "MS4A1", "CD80","IGHG1","GNLY", "CD8B","CD4","LEF1", "RORC","CTLA4")
+window_size <- 0.1e4
+library(EnsDb.Hsapiens.v86)
+edb <- EnsDb.Hsapiens.v86
+
+loc_list <-
+  lapply(gene, function(i){
+    locus(gene = i,
+	        flank = window_size,
+	        ens_db = edb)
+  })
+names(loc_list) <- gene
+
+gene_tracks <-
+  lapply(loc_list, function(i){
+    gg_genetracks(i, cex.text = 1, filter_gene_biotype = "protein_coding") + 
+#     scale_x_continuous(limits = i$xrange/1e6,
+# 		       labels = function(x) round(x, 2),
+# 		       expand = c(0, 0)) +
+    theme_minimal() + xlab("") + 
+    theme(
+      axis.text.x = element_blank(),
+      plot.background = element_rect(color = "white", fill = "white"))
+  }) 
+
+names(gene_tracks) <- gene
+# Atac-seq peaks
+bigwigs <- "../output/u19_multiomics/analyses/u19_peaks_tissue/GroupBigWigs/CellGroup/" |>
+    list.files(full.name = TRUE, pattern = "*.bw")
+
+names(bigwigs) <- 
+    unlist(lapply(basename(bigwigs), function(i){strsplit(i, "-")[[1]][1]}))
+
+loc_DF <- data.frame(
+  t(sapply(loc_list, function(i){c(i$seqname, i$xrange[1], i$xrange[2])}))) 
+
+plot_list <- list()
+for(loc in loc_list){
+  interv <- GRanges(glue("chr{loc$seqname}"), IRanges(loc$xrange[1], loc$xrange[2]))
+
+  atac_ranges <- map(bigwigs[1:9], ~import(., which = interv)) 
+  
+  atac_covered <-
+      atac_ranges |>
+      map_dfr(~as.data.frame(.) |> as_tibble(), .id = "CellType") |>
+      dplyr::select(CellType, start, end, score) %>%
+      mutate(CellType = gsub("Lung_", "", CellType))
+  
+  atac_gaps <- 
+      atac_ranges |>
+      map_dfr(~ranges(.) |> gaps() |> as.data.frame() |> as_tibble(), .id = "CellType") |>
+      mutate(score = 0) |>
+      dplyr::select(CellType, start, end, score)
+  
+  atac_peaks <- 
+      bind_rows(atac_covered, atac_gaps) |>
+      arrange(CellType, start) |>
+      pivot_longer(start:end, names_to = "dummy", values_to = "pos") |>
+      dplyr::filter(CellType != "Other") |>
+      mutate(CellType = factor(CellType,
+                               levels = gsub("/", ".", ct_order),
+                               labels = ct_order))
+  
+  
+  atac_plot <- 
+      ggplot(atac_peaks %>%
+               mutate(CellType = factor(CellType, levels = ct_order2))) +
+      geom_ribbon(aes(x = pos, ymin = 0, ymax = score, 
+                      color = CellType, fill = CellType),
+  		linewidth = .5, outline.type = "full", alpha = .5) +
+      scale_x_continuous(
+             limits = loc$xrange, 
+  		       labels = function(x) round(x/1e6L, 2),
+  		       expand = c(0, 0)) +
+      scale_color_manual(values = pal_atac) +
+      scale_fill_manual(values = pal_atac) +
+      facet_wrap(~ CellType, ncol = 1, strip.position = "left") +
+      theme_minimal() +
+      theme(
+  	  legend.position = "none",
+  	  axis.text.y = element_blank(),
+  	  axis.ticks.y = element_blank(),
+  	  #strip.text.y.left = element_text(angle = 0, size = 12),
+  	  strip.text.y.left = element_blank(),
+  	  panel.grid.major.x = element_blank(),
+  	  panel.grid.minor.x = element_blank(),
+  	  panel.grid.major.y = element_blank(),
+  	  panel.grid.minor.y = element_blank(),
+  	  plot.background = element_rect(color = "white", fill = "white")) +
+      labs(x = NULL)
+
+    plot_list[[loc$gene]] <- 
+        plot_grid(gene_tracks[[loc$gene]], atac_plot, rel_heights  = c(0.2, 1),
+                  ncol = 1)
+}
+```
+
+```{r, fig.width = 8, fig.height = 8}
+library(ggpubr)
+ggarrange(
+          plot_list$MS4A1,
+          plot_list$GNLY,
+          plot_list$CD8B,
+          plot_list$LEF1,
+          plot_list$RORC,
+          plot_list$CTLA4,
+          ncol = 6)
+```
+
+## Peak accessibility heatmap by cell type
+
+```{r}
+# Add Seurat cluster from the matched rna to the archR object
+rnameta <- read.csv("output/lung_spleen_metadata.csv")
+rnameta$core_ID <- factor(rnameta$full.ident, 
+                          labels = c(paste0("SMO", "-", c(2,3,5,7,8,9)),
+                                     paste0("SMO", "-", c(1, 4, 10))))
+rnameta$CellBarcode <-paste(rnameta$core_ID, gsub("-", "_", rownames(rnameta)), sep = "#")
+rnameta$CellBarcode <- unlist(lapply(rnameta$CellBarcode, function(i) {strsplit(i, "_")[[1]][1]}))
+atacmeta <- 
+  data.frame(proj@cellColData) %>% 
+    mutate(CellBarcode = unlist(lapply(rownames(proj@cellColData), function(i) {paste(strsplit(i, "-")[[1]][1:2], collapse = "-")})))
+atacmeta <- left_join(atacmeta, rnameta[, c("CellBarcode", "wsnn_MajorityVoting", "integrated_snn_res.0.5")]) #seurat_clusters
+proj@cellColData$SeuratCluster <- atacmeta$integrated_snn_res.0.5
+proj@cellColData$wsnn_MajorityVoting <- atacmeta$wsnn_MajorityVoting
+
+# First, get marker peaks per cell type/cluster
+markersPeaks <- getMarkerFeatures(
+  ArchRProj = proj,
+  useMatrix = "PeakMatrix",
+  groupBy = "PredCellType",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  testMethod = "wilcoxon"
+)
+
+# Change the order of y-axis labels
+if (!is.null(y_axis_label)) {
+  markersPeaks = markersPeaks[, y_axis_label]
+}
+
+# Then plot the heatmap
+heatmapPeaks <- plotMarkerHeatmap(seMarker = markersPeaks,
+                                  cutOff = "FDR <= 0.01 & Log2FC >= 1",
+                                  transpose = TRUE)
+
+# Draw it
+ComplexHeatmap::draw(heatmapPeaks, heatmap_legend_side = "bot")
+
+ArchRProj <-
+  addMotifAnnotations(ArchRProj, motifSet = "cisbp", name = "Motif")
+
+enrichMotifs <- peakAnnoEnrichment(
+  seMarker = markersPeaks,
+  ArchRProj = proj[proj@cellColData$PredCellType != "Other"],
+  peakAnnotation = "Motif",
+  cutOff = "FDR <= 0.1 & Log2FC >= 0.58"
+)
+
+colnames(enrichMotifs)[7] <- "memCD4_T"
+heatmapEM <-
+  plotEnrichHeatmap(enrichMotifs, n = 15, transpose = TRUE)
+ComplexHeatmap::draw(
+  heatmapEM,
+  heatmap_legend_side = "bot",
+  annotation_legend_side = "bot",
+  row_order = toshow_ct[1:8]
+)
+
+# output enriched motifs into a data frame
+library(SummarizedExperiment)
+
+# one assay (first by default, or name it)
+mat <- assay(se)                  # or assay(se, "counts")
+df  <- as.data.frame(mat)
+
+# keep row names as a column
+df <- data.frame(feature = rownames(mat), mat, check.names = FALSE)
+# Or save it as a PDF
+plotPDF(heatmapPeaks, name = "Peak-Marker-Heatmap_review", 
+          width = 8, height = 6, ArchRProj = proj, addDOC = FALSE)
+```
+
+## Validate cell types with motif enrichment
+```{r}
+enrichMotifs <- peakAnnoEnrichment(
+    seMarker = markersPeaks[, toshow_ct[toshow_ct!="Other"]],
+    ArchRProj = proj,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.2 & Log2FC >= 0.5"
+  )
+```
+
+```{r}
+heatmapEM <- plotEnrichHeatmap(enrichMotifs, n = 20, transpose = TRUE)
+```
+
+```{r}
+ComplexHeatmap::draw(heatmapEM, 
+                     heatmap_legend_side = "bot", 
+                     annotation_legend_side = "bot",
+                     row_order = toshow_ct[toshow_ct!="Other"])
+
+dev.off()
+plotPDF(heatmapEM, name = "Motifs-Enriched-Marker-Heatmap", width = 10, height = 5, ArchRProj = proj, addDOC = FALSE)
+
+```
+
+```{r}
+motifsUp <- peakAnnoEnrichment(
+    seMarker = T_markerTest,
+    ArchRProj = proj,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.1 & Log2FC >= 0.5"
+  )
+
+df <- data.frame(TF = rownames(motifsUp), mlog10Padj = assay(motifsUp)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+head(df, 20)
+
+motifsDn <- peakAnnoEnrichment(
+    seMarker = T_markerTest,
+    ArchRProj = proj,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.1 & Log2FC <= -0.5"
+  )
+```
+
+```{r}
+df <- data.frame(TF = rownames(motifsDn), mlog10Padj = assay(motifsDn)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+head(df, 20)
+```
+
+
+```{r}
+heatmapEM <- plotEnrichHeatmap(enrichMotifs, n = 30, transpose = TRUE)
+ComplexHeatmap::draw(heatmapEM, 
+                     heatmap_legend_side = "bot", 
+                     annotation_legend_side = "bot")
+                     #row_order = toshow_ct[toshow_ct!="Other"])
+```
+```{r}
+df <- data.frame(TF = rownames(enrichMotif), mlog10Padj = assay(motifsUp)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- seq_len(nrow(df))
+```
+
+# Codes for RNA label transfering approach
+```{r}
+proj <- addGeneIntegrationMatrix(
+    ArchRProj = proj, 
+    useMatrix = "GeneScoreMatrix",
+    reducedDims = "IterativeLSI",
+    seRNA = seRNA,
+    addToArrow = FALSE,
+    groupRNA = "CellType",
+    nameCell = "predictedCell3_Un",
+    nameGroup = "predictedGroup3_Un",
+    nameScore = "predictedScore3_Un"
+)
+
+atac_meta <- readRDS("data/atac_meta_integration.RDS")
+print("Jaccard similarity scores for comparing original RNA labels and transferred labels:")
+jaccard(metadata$CorrectLabs[!is.na(metadata$CorrectLabs)],
+        metadata$predictedGroup2_Un[!is.na(metadata$CorrectLabs)])
+p <- as.character(metadata$CorrectLabs[!is.na(metadata$CorrectLabs)])
+q <- metadata$predictedGroup2_Un[!is.na(metadata$CorrectLabs)]
+
+```
+
+```{r}
+p1 <-plotEmbedding(ArchRProj = proj, colorBy = "cellColData", 
+              name = "correctLabs", embedding = "UMAP",
+              pal = pal, baseSize = 15, ) + 
+  theme_ArchR(legendPosition = "bottom", legendTextSize = 7)
+
+p2 <-plotEmbedding(ArchRProj = proj, colorBy = "cellColData", 
+              name = "correctTransfer", embedding = "UMAP",
+              pal = pal, baseSize = 15, ) + 
+  theme_ArchR(legendPosition = "bottom", legendTextSize = 7)
+
+ggAlignPlots(p1, p2, type = "h")
+```
+

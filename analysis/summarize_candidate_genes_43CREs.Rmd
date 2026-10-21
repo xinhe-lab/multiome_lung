@@ -1,0 +1,463 @@
+---
+title: "Summarize candidate genes"
+output: html_notebook
+---
+
+# Comparing our linked genes with Ethan's list of prioritized genes
+
+## load genes with nonzero scores
+```{r}
+library(data.table)
+library(rtracklayer)
+library(dplyr)
+library(tidyr)
+ch=import.chain("data/hg19ToHg38.over.chain")
+aoa <- read.table("data/aoa_gene_scores.txt", header = T)
+coa <- read.table("data/coa_gene_scores.txt", header = T)
+gr_peaks_sub <- readRDS("data/asthma_related_CREs_final43.RDS")
+pal_atac <- readRDS("data/color_codes.RDS")
+names(pal_atac)[3] <- "memCD4_T"
+```
+
+```{r}
+multiome_tbl <- readRDS("output/scE2G/scE2G_p2g_significant_links.RDS")
+p2g_summary <- p2g_tbl %>%
+  mutate(Gene = unlist(lapply(p2g_tbl$cutLabel, function(i){strsplit(i, "_")[[1]][2]})),
+         trait = gr_peaks_p2g$trait[match(Peak, gr_peaks_p2g$Peak)],
+    GeneScore = ifelse(trait == "aoa", aoa$Score[match(Gene, aoa$Gene)], coa$Score[match(Gene, coa$Gene)]))
+
+p2g_gr <- 
+  p2g_summary %>% dplyr::select(c(Peak, GeneScore, Gene)) %>%
+    distinct() %>%
+    group_by(Peak) %>%
+    dplyr::summarise(linkedGene = paste(Gene, collapse = ","),
+                     GeneScore = paste(GeneScore, collapse = ","))
+
+p2g_gr <- GRanges(p2g_gr$Peak,
+                  LinkedGene = p2g_gr$linkedGene,
+                  GeneScore = p2g_gr$GeneScore,
+                  Peak = p2g_gr$Peak)
+```
+load Ethan's list of CREs
+```{r}
+aoa <- fread("~/projects/Lung_scMultiomics_paper/data/aoa_ePIPs.txt")
+coa <- fread("~/projects/Lung_scMultiomics_paper/data/coa_ePIPs.txt")
+
+aoa_scores <- read.table("../data/aoa_gene_scores.txt", header = T)
+coa_scores <- read.table("../data/coa_gene_scores.txt", header = T)
+gene_scores <- 
+  rbind(data.frame(aoa_scores, Trait = "aoa"),
+        data.frame(coa_scores, Trait = "coa"))
+
+```
+
+```{r}
+cre_gr <- c(GRanges(data.frame(trait = "aoa", aoa)), 
+               GRanges(data.frame(trait = "coa", coa)))
+seqlevelsStyle(cre_gr) <- "UCSC"
+cre_gr <- unlist(liftOver(cre_gr, ch))
+
+nominated_genes <- mcols(cre_gr[, grep("gene", colnames(mcols(cre_gr)))])
+
+cre_gr$combined <- 
+  apply(nominated_genes[, -2], 1, function(i){
+    paste(i[i!=""], collapse = ",")
+  })
+cre_gr$nominated <-
+  unlist(apply(mcols(cre_gr)[, c("combined", "trait")], 1, function(i){
+    scores = gene_scores[gene_scores$Trait == i[2], ]
+    gene_sets = strsplit(i[1], ",")[[1]]
+    idx = which(scores$Score[match(gene_sets, scores$Gene)] >= 0.95)
+    return(paste(unique(gene_sets[idx]), collapse = ","))
+  }))
+```
+load fine-mapped SNPs
+```{r}
+coa <- readRDS("data/coa_gp3_finemapping_gwas_L5.rds")
+aoa <- readRDS("data/aoa_gp3_finemapping_gwas_L5.rds")
+
+aoa_gr <- GRanges(seqnames = paste0("chr", aoa$chr),
+                IRanges(start = aoa$pos,
+                        end = aoa$pos+1))
+mcols(aoa_gr) <- data.frame(aoa[, -4:-1], trait = "aoa")
+coa_gr <- GRanges(seqnames = paste0("chr", coa$chr),
+                IRanges(start = coa$pos,
+                        end = coa$pos+1))
+mcols(coa_gr) <- data.frame(coa[, -4:-1], trait = "coa")
+merge_gr <- c(coa_gr, aoa_gr)
+#liftOver to hg38
+ch=import.chain("data/hg19ToHg38.over.chain")
+seqlevelsStyle(merge_gr) <- "UCSC"
+snp_gr <- unlist(liftOver(merge_gr, ch))
+```
+
+
+```{r}
+print("CREs in Ethan's list")
+paired <- findOverlaps(p2g_gr, cre_gr)
+p2g_gr$NewCREs <- FALSE
+p2g_gr$NewCREs[setdiff(1:length(p2g_gr), paired@from)] <- TRUE
+p2g_gr$CandidateGenes <- ""
+p2g_gr$CandidateGenes[paired@from] <- cre_gr$nominated[paired@to]
+#find all fine-mapped SNPs in CREs
+aoa_peaks <- gr_peaks_sub[gr_peaks_sub$trait == "aoa"]
+aoa_snps <- snp_gr[snp_gr$trait == "aoa" & snp_gr$susie_pip > 0.1]
+aoa_paired <- findOverlaps(aoa_peaks + 250, aoa_snps)
+coa_peaks <- gr_peaks_sub[gr_peaks_sub$trait == "coa"]
+coa_snps <- snp_gr[snp_gr$trait == "coa" & snp_gr$susie_pip > 0.1]
+coa_paired <- findOverlaps(coa_peaks + 250, coa_snps)
+
+tbl <- rbind(
+data.frame(aoa_paired, trait = "aoa") %>% 
+  mutate(snp_pip = aoa_snps$susie_pip[subjectHits],
+         snp = aoa_snps$snp[subjectHits]) %>%
+    group_by(queryHits, trait) %>% 
+      dplyr::summarise(susie_pips = paste(round(snp_pip, 2), collapse = ","),
+                       snps = paste(snp, collapse = ",")) %>%
+  mutate(Peak = aoa_peaks$Peak[queryHits]),
+data.frame(coa_paired, trait = "coa") %>% 
+  mutate(snp_pip = coa_snps$susie_pip[subjectHits],
+         snp = coa_snps$snp[subjectHits]) %>%
+    group_by(queryHits, trait) %>% 
+      dplyr::summarise(susie_pips = paste(round(snp_pip, 2), collapse = ","),
+                       snps = paste(snp, collapse = ",")) %>%
+  mutate(Peak = coa_peaks$Peak[queryHits])
+)
+
+mcols(p2g_gr) <- left_join(data.frame(mcols(p2g_gr)), tbl[, -1])
+
+library(openxlsx)
+write.xlsx(
+  data.frame(mcols(p2g_gr[order(p2g_gr$NewCREs)])) %>%
+    dplyr::select(Peak, LinkedGene, GeneScore, NewCREs, CandidateGenes, trait, snps, susie_pips),
+  "output/asthma_candidate_risk_genes_43CREs.xlsx", quote = F)
+```
+
+```{r}
+output <-
+p2g_summary %>% 
+  filter(Peak %in% as.character(GRanges(uniq_tbl)) &
+           Gene %in% unlist(strsplit(uniq_tbl$E2G.genes, ","))) %>%
+  group_by(Peak, Gene) %>%
+  dplyr::summarise(CellType = paste(p2g_CellType, collapse = ",")) %>%
+  mutate(NearestGene = gr_peaks_sub$nearestGene[match(Peak, gr_peaks_sub$Peak)])
+ 
+out_gr <- GRanges(output$Peak)
+mcols(out_gr) <- output[, -1]
+```
+
+Assessing our nominated genes vs. Ethan's using PoPs
+
+```{r}
+tbl <- readxl::read_xlsx("output/asthma_candidate_risk_genes_43CREs.xlsx")
+e2g_genes <- unlist(lapply(tbl$LinkedGene, function(i){strsplit(i, ",")[[1]]}))
+candi_genes <- unlist(lapply(cre_gr$nominated, function(i){strsplit(i, ",")[[1]]}))
+pops_dir <- "data/pops/"
+aoa_pops <- fread(paste0(pops_dir, "ukb_aoa/ukb_aoa.preds"))
+library(org.Hs.eg.db)
+mapGeneIDs <- function(query, query_type,
+                        output_types) {
+
+  mapped = AnnotationDbi::select(org.Hs.eg.db,
+                  keys = query,
+                  columns = output_types,
+                  keytype = query_type)
+  return(mapped)
+}
+mapped <- mapGeneIDs(unique(e2g_genes), "SYMBOL", "ENSEMBL")
+idx = match(mapped[, "ENSEMBL"], aoa_pops$ENSGID)
+pops_E2G <- data.frame(Gene = unique(e2g_genes)[!is.na(idx)],
+                       pops = aoa_pops$PoPS_Score[idx[!is.na(idx)]])
+  
+mapped <- mapGeneIDs(unique(candi_genes), "SYMBOL", "ENSEMBL")
+idx = match(mapped$ENSEMBL, aoa_pops$ENSGID)
+pops_candi <- data.frame(Gene = unique(candi_genes)[!is.na(idx)],
+                       pops = aoa_pops$PoPS_Score[idx[!is.na(idx)]])
+
+t.test(pops_E2G$pops, pops_candi$pops)
+# compare pops scores between 
+```
+
+
+Making a pie plot to present the comparison results
+```{r}
+
+data <- data.frame(
+  counts = c(6,1,4,3,11),
+  category = c("Replicated",
+               "Non-overlapping",
+               "More refined",
+               "Novel CREs",
+               "Novel genes")) %>%
+  mutate(percentage = counts/sum(counts))
+pie <- ggplot(data,
+              aes(x = "", y = percentage, 
+                        fill = category)) +
+    geom_bar(stat = "identity", width = 1) +
+    coord_polar("y", start = 0) +
+    theme_void() +  # Remove background and axes
+    geom_text(aes(label = counts), 
+              position = position_stack(vjust = 0.5), size = 8) +  # Adjust size as needed
+    scale_fill_manual(
+      
+      values = c("#beaed4", "#ffff99","#386cb0", "#fdc086","#7fc97f"))+ 
+    labs(fill = "") + 
+    theme(legend.text = element_text(size = 18))# Legend title
+pie
+```
+
+A table to summarize our identified genes
+
+```{r}
+f <- read.table("tables/43CREs_linked_genes.txt", head = TRUE)
+
+pops_dir <- "output/pops/"
+aoa_pops <- fread(paste0(pops_dir, "ukb_aoa/ukb_aoa.preds"))
+# get pops_E2G from earlier analysis in final_p2g_43_CREs
+f$pops <- pops_E2G$pops[match(f$Gene, pops_E2G$Gene)]
+f$ClosestGene <- f$Gene %in% gr_peaks_sub$nearestGene
+
+write.table(f[, 1:4], "tables/43CREs_linked_genes.txt", quote = F, row.names = F, sep = "\t")
+```
+
+### E2G scores for selected examples
+
+```{r}
+p2g_tbl <- readRDS("../data/E2G_bubble_plots_toshow.RDS")
+gginput <- p2g_tbl %>% filter(grepl("LRRC32", cutLabel)|grepl("CCR4", cutLabel))
+to_show <- names(table(proj@cellColData$PredCellType))
+ggplot(
+  gginput %>% 
+    mutate(cutLabel = 
+             factor(cutLabel,
+                    levels = levels(factor(gginput$cutLabel))[c(3,1,2)])),
+  aes(y = E2G.Score.qnorm,
+      x = factor(CellType, levels = to_show),
+      fill = CellType)) + 
+  geom_col(width = 0.5) + xlab("") + ylab("E2G score") + 
+  scale_fill_manual(values = pal_atac) + 
+  facet_grid(cutLabel ~.) +
+  theme_pub(base_size = 12) + 
+  theme(legend.position = "none")
+
+```
+
+
+
+
+### More evidence to support our prioritized variants and genes
+
+```{r}
+library(openxlsx)
+summary_tbl <- readxl::read_xlsx("../output/E2G_analysis/asthma_candidate_risk_genes_43CREs.xlsx")
+pops_p2g <- readRDS("../data/plots/E2G_PoPs_by_genes.RDS")
+eqtl_list <- readRDS("../output/E2G_analysis/natri2023_eQTLs.RDS")
+gene_tbl <- 
+  summary_tbl %>% 
+    separate_rows(LinkedGene, sep = ",") %>%
+    dplyr::select(-c(Peak, GeneScore, NewCREs, CandidateGenes, snps, susie_pips)) %>%
+    distinct()
+prior_tbl <- 
+    summary_tbl %>%
+    separate_rows(CandidateGenes,sep = ",") %>%
+    filter(!is.na(CandidateGenes)) %>%
+    dplyr::select(CandidateGenes, LinkedGene) %>%
+    distinct()
+
+gene_tbl$PoPS <- pops_p2g$pops[match(gene_tbl$LinkedGene, pops_p2g$SYMBOL)]
+gene_tbl$ClosestGene <- gene_tbl$LinkedGene %in% gr_peaks_sub$nearestGene
+
+eqtl_pairs <-
+  lapply(prior_tbl$CandidateGenes, function(i) {
+    pairs <-c()
+    for(ct in names(eqtl_list)) {
+      if(i %in% eqtl_list[[ct]]$targetGene) {
+        rows = 
+          data.frame(mcols(eqtl_list[[ct]])) %>% 
+            filter(targetGene == i) %>%
+              mutate(CandidateGenes = targetGene,
+                     snps = rsid) %>%
+              dplyr::select(rsid, targetGene)
+        pairs <- rbind(pairs,
+          data.frame(
+            "CellType" = ct,
+            rows))
+      }
+    }
+    return(pairs)
+  })
+eqtl_pairs <- do.call(rbind, eqtl_genes[!sapply(eqtl_genes, is.null)])
+gene_tbl$Lung_eGene <- gene_tbl$LinkedGene %in% eqtl_pairs$LinkedGene
+
+
+# asthma eGene datasets
+eGenes_set1 <- fread("~/cluster/projects/u19_multiomics/other_data/weilong/TableS5_1_asthma-risk-genes_ALOFT__TableS12.txt.gz")
+eGenes_set2 <- fread("~/cluster/projects/u19_multiomics/other_data/weilong/TableS5_2_asthma-risk-genes_GTEx__TableS13.txt.gz")
+eGenes_combined <- rbind(
+  data.frame(study = "ALOFT", eGenes_set1),
+  data.frame(study = "GTEx", eGenes_set2)
+)
+mapping <- 
+  mapGeneIDs(eGenes_combined$gene, 
+             query_type  = "ENSEMBL", 
+             output_types = "SYMBOL")
+eGenes_combined$eGenes <- 
+  mapping$SYMBOL[match(eGenes_combined$gene, mapping$ENSEMBL)]
+
+eGenes_combined %>% filter(symbol %in% gene_tbl$LinkedGene)
+
+gene_tbl$Asthma_eGene <- 
+  gene_tbl$LinkedGene %in% eGenes_combined$eGenes[eGenes_combined$study == "ALOFT"]
+
+library(openxlsx)
+write.xlsx(gene_tbl %>% distinct(),
+   "../output/tables/scE2G_predicted_target_genes.xlsx", quote = F)
+
+```
+putative causal genes (PCGs) for asthma risk. The PCGs are defined as those with an FDR < 10% from INTACT. 
+```{r}
+riskGenes_set1 <- fread("~/cluster/projects/u19_multiomics/other_data/weilong/TableS5_1_asthma-risk-genes_ALOFT__TableS12.txt.gz")
+riskGenes_set2 <- fread("~/cluster/projects/u19_multiomics/other_data/weilong/TableS5_2_asthma-risk-genes_GTEx__TableS13.txt.gz")
+riskGenes_combined <- unique(
+    c(riskGenes_set1$symbol[riskGenes_set1$FDR_intact < 0.1],
+      riskGenes_set2$symbol[riskGenes_set1$FDR_intact < 0.1])
+    )
+aloft_genes <- riskGenes_set1$symbol[riskGenes_set1$FDR_intact < 0.1]
+gtex_genes <- riskGenes_set1$symbol[riskGenes_set1$FDR_intact < 0.1]
+
+random_genes <- do.call(rbind, random_genes)
+
+EnrichmentTest(var1 = unique(gene_tbl$LinkedGene),
+               var2 = unique(aloft_genes),
+               bkg = union(gene_tbl$LinkedGene, random_genes$SYMBOL))
+```
+
+### barplot to compare PoPs across methods
+
+```{r}
+library(ggnewscale)
+gginput <-
+  gene_tbl %>% mutate(PreviousEvidence = PreviousEvidence >= 0.95) %>%
+  filter(linkedGenes %in% c("IL15RA", "IL2RA", "PFKFB3", "PRKCQ",
+                            "LRRC32", "CXCR5", "ERBB3", "IKZF4",
+                            "SMAD3", "RAD50", "CEBPA", "TCF7", "IL4", "RORC")) %>%
+  na.replace(0) %>%
+  mutate(RelevanceToAsthma = case_when(
+    linkedGenes %in% c("IL4", "IL2RA", "PRKCQ") ~ 3,
+    linkedGenes %in% c("IL15RA", "LRRC32", "SMAD3", "RORC") ~ 2,
+    linkedGenes %in% c("PFKFB3", "CXCR5", "IKZF4", "ERBB3",
+                       "RAD50", "CEBPA", "TCF7") ~ 1)) %>%
+  pivot_longer(2:5, names_to = "Features", values_to = "Values")
+
+p_ranks <-
+  ggplot(gginput %>% filter(Features %in% c("PreviousEvidence")),
+         aes(y = factor(linkedGenes,levels = gene_tbl$linkedGenes[order(gene_tbl$PoPs)]),
+             x = Features,
+             fill = as.character(Values))) + 
+    ylab("") + xlab("") + 
+    geom_tile() + 
+    theme_minimal() +
+    scale_fill_manual(
+      values = c("0" = "grey90", "1" = "black")) + #, name = "ClosestGene") + 
+    #scale_fill_viridis_b() + 
+    new_scale_fill() +
+    geom_tile(data = gginput[gginput$Features == "PoPs", ],
+              aes(x = Features, 
+                  y = factor(linkedGenes,levels = gene_tbl$linkedGenes[order(gene_tbl$PoPs)]),
+                  fill = Values)) + 
+    scale_fill_viridis_b() + 
+    new_scale_fill() + 
+    geom_tile(data = gginput[gginput$Features == "RelevanceToAsthma", ],
+              aes(x = Features, 
+                  y = factor(linkedGenes,levels = gene_tbl$linkedGenes[order(gene_tbl$PoPs)]),
+                  fill = factor(Values))) + 
+    scale_fill_viridis_d(option = "A", 
+                         name = "Relevance",
+                         labels = c("low", "medium", "high")) +
+    scale_x_discrete(
+      labels = c("PoPs" = "PoPS", 
+                 "PreviousEvidence" = "Previous\nEvidence",
+                 "ClosestGene" = "Closest\nGene",
+                 "RelevanceToAsthma" = "Asthma\nRelevance")) + 
+    theme_pub(base_size = 13)
+
+```
+
+
+```{r}
+library(AnnotationDbi)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene
+set.seed(101)
+# get genes within 500kb near CRE as background
+random_genes <- lapply(as.character(gr_peaks_sub), function(i){
+  paired = subsetByOverlaps(genes(txdb), GRanges(i), maxgap = 500000)
+  mapped = mapGeneIDs(paired$gene_id, "ENTREZID", c("SYMBOL","ENSEMBL"))
+  return(mapped)
+})
+
+
+pops_dir <- "/home/jinggu/scratch-midway2/github/pops/test/out/"
+pops <- fread(paste0(pops_dir, "ukb-a-446_pops/ukb-a-446.preds"))
+pops_random <- 
+  unlist(lapply(random_genes, function(i) {
+    idx = match(i$ENSEMBL, pops$ENSGID)
+    return(pops$PoPS_Score[idx[!is.na(idx)]])
+  }))
+
+pops_target <-
+  list(NBreg1_genes,
+       scE2G_multiome,
+       scE2G_atac,
+       archR_genes)
+
+names(pops_target) <- c("NB_regression",
+                        "scE2G_multiome",
+                        "scE2G_ATAC",
+                        "ArchR")
+pops_target <-
+  lapply(names(pops_target), function(i) {
+    data.frame(method = i,
+    pops[
+    match(mapGeneIDs(pops_target[[i]], 
+                     "SYMBOL", 
+                     "ENSEMBL")$ENSEMBL, 
+          pops$ENSGID), c("ENSGID", "PoPS_Score")])
+  })
+# include Ethan's list
+load("../plots/benchmark_p2g_pops.RData")
+previous <- gene_scores$Gene[gene_scores$Score >= 0.95]
+previous_pops <- pops[
+  match(mapGeneIDs(previous,"SYMBOL", "ENSEMBL")$ENSEMBL, 
+        pops$ENSGID), c("ENSGID", "PoPS_Score")]
+
+
+pops_target <- do.call(rbind, pops_target)
+
+pops_target$SYMBOL <- 
+  mapGeneIDs(pops_target$ENSGID,
+             "ENSEMBL",
+             "SYMBOL")$SYMBOL
+gginput <- fread("../tables/linked_genes_PoPS.txt")
+
+gginput <- 
+  rbind(
+    pops_target[, c("method", "PoPS_Score")],
+    data.frame(method="random", 
+               PoPS_Score=pops_random))
+
+ggplot(
+  gginput,
+       aes(y = PoPS_Score,
+           x = method,
+           fill = method)) +
+  geom_boxplot(outlier.shape = NA, width = 0.5) +
+  geom_jitter(width = 0.2,
+              alpha = 0.4,
+              size = 0.5)  + 
+  theme_ArchR(baseSize = 18, 
+              legendTextSize = 16,
+              legendPosition = 'none') + 
+  xlab("") + ylab("PoPS")
+```
+

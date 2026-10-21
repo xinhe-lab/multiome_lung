@@ -1,0 +1,681 @@
+---
+title: "link CREs to genes with scE2G"
+output: html_document
+date: '2025-08-26'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Matrix)
+library(dplyr)
+library(GenomicRanges)
+library(liftOver)
+library(data.table)
+library(stringr)
+library(ggplot2)
+library(ggrepel)
+library(ArchR)
+library(tidyr)
+library(ComplexHeatmap)
+library(stats)
+
+source("code/utility_function.R")
+source("code/make_plots.R")
+ch=import.chain("data/hg19ToHg38.over.chain")
+ct_order <-
+  c(
+  "Naive_B",
+  "Memory_B",
+  "NK",
+  "CD8_T",
+  "CD8.CD4_T",
+  "CD4_T",
+  "memCD4_T",#"Th17.CD4_T",
+  "Treg"
+)
+
+
+proj <- loadArchRProject("output/u19_peaks_tissue/")
+pal_atac <- readRDS("data/color_codes.RDS")
+gr_peaks_sub <- readRDS("data/asthma_related_CREs_final43.RDS")
+```
+
+
+# Process scE2G outputs
+
+## Filter cell types by asthma CREs being called as peaks
+
+```{r, echo = F}
+peak_dir = "/home/jinggu/cluster/projects/u19_multiomics/analyses/u19_peaks_tissue/PeakCalls/"
+peaks<-list()
+for(i in list.files(peak_dir, pattern = ".rds")[1:9]){
+  term <- strsplit(i, "-")[[1]][1]
+  peaks[[term]] <- readRDS(paste0(peak_dir, i))
+}
+
+celltype_list <- 
+  lapply(1:length(gr_peaks_sub), function(i){
+    selected_ct = c()
+    for(j in names(peaks)){
+      res = findOverlaps(gr_peaks_sub[i], peaks[[j]])
+      if(length(res) > 0){
+        selected_ct = gsub("Lung_", "", c(selected_ct, j))
+      }
+    }
+    return(selected_ct)
+  })
+gr_peaks_sub$Peak <- as.character(gr_peaks_sub)
+gr_peaks_sub$CellTypes <-
+  unlist(lapply(celltype_list, function(i){
+    paste(i[i != "Other"], collapse = ",")
+  }))
+
+celltype_list <- 
+  lapply(1:length(gr_peaks_sub), function(i){
+    selected_ct = c()
+    for(j in names(peaks)){
+      res = findOverlaps(gr_peaks_sub[i], peaks[[j]])
+      if(length(res) > 0){
+        if(grepl("CD4_T", j) | grepl("Treg", j)){
+          j = "CD4_T"
+        }else if(grepl("B", j)){
+          j = "B"
+        }
+        selected_ct = gsub("Lung_", "", c(selected_ct, j))
+      }
+    }
+    return(unique(selected_ct))
+  })
+
+gr_peaks_sub <- gr_peaks_sub[gr_peaks_sub$CellTypes!= ""]
+# filter out SNPs not in credible sets
+gr_peaks_sub <- gr_peaks_sub[gr_peaks_sub$CS > 0]
+```
+
+## Overlap scE2G peaks with our OCRs
+```{r}
+# match scE2G peaks to ArchR peakset requiring at least 250 bp overlapped
+getMatchedPeaks <- function(query, ref_gr){
+  peak_list <- 
+  lapply(query, function(i){
+    p2g_gr <- GRanges(i)
+    paired <- mergeByOverlaps(p2g_gr, ref_gr, minoverlap = 250)
+    paired$p2g_gr <- as.character(paired$p2g_gr)
+    paired$ref_gr <- as.character(paired$ref_gr)
+    return(paired)
+  })
+  peak_tbl <- do.call(rbind, peak_list)
+  return(peak_tbl)
+}
+
+out_dir <- "output/u19_multiome_doubletRM/"
+multiome_p2g <- lapply(gsub("/", ".", ct_order), function(i){
+  f <- fread(sprintf("%s/%s/multiome_powerlaw_v3/encode_e2g_predictions.tsv.gz",
+                     out_dir, i))
+  return(data.frame(f[f$E2G.Score.qnorm >= 0.2, ]))
+})
+multiome_p2g <- getMatchedPeaks(multiome_p2g, proj@peakSet)
+```
+summarize peak-to-gene links
+```{r}
+data.frame(multiome_p2g) %>% 
+  dplyr::select(peakID, TargetGene, CellType) %>% 
+    distinct() %>%
+  group_by(CellType) %>% dplyr::summarise(n = n())
+```
+
+## summarize E2G links
+
+```{r}
+summarize_scE2G <- function(p2g_links, group_by, cutoff){
+  # extract links across cell types where peaks were confidently called
+  gr_peaks_p2g <-
+  apply(mcols(gr_peaks_sub)[, c("Peak", group_by)], 1, function(i){
+    links <- 
+        lapply(strsplit(i[2], ",")[[1]], function(j){
+          filtered <-   
+          data.frame(p2g_links[[j]]) %>% 
+            dplyr::filter(ref_gr == i[1]) #& E2G.Score.qnorm >= cutoff) 
+          if(nrow(filtered) != 0){
+            filtered %>%
+              mutate(p2g_CellType = j,
+                      Peak = i[1],
+                      Gene = TargetGene,
+                      Beta = round(E2G.Score.qnorm, 2)) %>% 
+              dplyr::select(Peak, p2g_CellType, Gene, Beta, trait) 
+          }
+        })
+      return(do.call(rbind, links))
+  })
+  
+  # summarize links per gene 
+  p2g_summary <- do.call(rbind, gr_peaks_p2g) %>%
+    filter(!(grepl("AS", Gene) | grepl("LINC", Gene)))
+
+  barplot(
+    table(
+      p2g_summary[p2g_summary$Beta >= cutoff, c("Peak", "Gene")] %>% 
+        distinct() %>% 
+        group_by(Peak) %>%
+        dplyr::summarise(n = n()) %>% 
+          pull(n)),
+    main = "", xlab = "Number of links per gene across cell types"
+    )
+  # summarize results into a table
+  p2g_tbl <-
+    lapply(gr_peaks_p2g[lapply(gr_peaks_p2g, is.null) == FALSE], function(i) {
+      # filter out insignificant links
+      i <- i %>% filter(Beta >= cutoff)
+      c(unique(i[, 1]), apply(i[, 2:4], 2, function(j) {
+        paste(j, collapse = ",")
+      }))
+    })
+  p2g_tbl <- do.call(rbind, p2g_tbl)
+  colnames(p2g_tbl)[1] <- "Peak"
+  p2g_tbl <- left_join(
+    data.frame(Peak = gr_peaks_sub$Peak),
+    data.frame(p2g_tbl), by = "Peak"
+  )
+  return(list(p2g_tbl, p2g_summary))
+}
+
+get_scE2G_mat <- function(p2g_summary, cutoff){
+  # built a matrix of E2G scores for selected peaks 
+  selected = 
+    p2g_summary %>% 
+      filter(Beta >= cutoff) %>%
+      mutate(Label = paste(Peak, Gene, sep = "_")) %>%
+      pull(Label)
+  p2g_mat = 
+    p2g_summary %>%
+      mutate(Label = paste(Peak, Gene, sep = "_")) %>%
+      filter(Label %in% unique(selected)) %>%
+      dplyr::select(-c(Peak, Gene)) %>%
+      pivot_wider(names_from = p2g_CellType,
+                  values_from = Beta) %>%
+      na.replace(0)
+  return(p2g_mat)
+}
+```
+
+```{r}
+#load("~/cluster/projects/u19_multiomics/output/scE2G/scE2G_p2g_asthmaCREs.RData")
+multiome_p2g <- readRDS("output/E2G_analysis/scE2G_multiome_mapped_asthma_loci.RDS")
+gr_peaks_sub$CellTypes <- gsub("Th17.CD4_T", "memCD4_T", gr_peaks_sub$CellTypes)
+p2g_links <- split(multiome_p2g, multiome_p2g$CellType)
+multiome_tbl <- summarize_scE2G(p2g_links, "CellTypes", cutoff = 0.2)
+scE2G_multiome <- unique(unlist(strsplit(multiome_tbl[[1]]$Gene, ",")))
+scE2G_multiome <- scE2G_multiome[!is.na(scE2G_multiome)]
+```
+
+### Histogram of genes linked per asthma CRE
+```{r}
+summary_tbl <- data.frame(
+    type = "scE2G_multiome",
+    n = multiome_tbl[[2]] %>% 
+          filter(Beta >= 0.2) %>%
+          dplyr::select(Peak, Gene) %>% 
+          distinct() %>% 
+          group_by(Peak) %>%
+          dplyr::summarise(n = n()) %>% 
+            pull(n))
+summary_tbl <-
+    lapply(unique(summary_tbl$type), function(i){
+      counts <- data.frame(table(summary_tbl$n[summary_tbl$type == i]))
+      colnames(counts) <- c("nGenesPerCRE", "nCREs")
+      counts$nGenesPerCRE <- as.numeric(counts$nGenesPerCRE)
+      counts <- rbind(c(0, length(gr_peaks_sub)-sum(counts$nCREs)), counts)
+      data.frame(method = i, counts)
+    })
+
+summary_tbl <- do.call(rbind, summary_tbl)
+    
+```
+
+```{r, fig.width = 6, fig.height = 4}
+p1 <-
+ggplot(summary_tbl,
+       aes(x = nGenesPerCRE,
+           y = nCREs)) + 
+           #fill = method)) + 
+  geom_col(width = 0.4) +
+  theme_pub() + ylab("Count") + 
+  theme(legend.position = "none") +  xlab("#Genes linked per asthma CRE")
+p1
+```
+
+## Validate E2G links using different analyses
+
+### POP Scores
+
+```{r, fig.width = 10}
+# map gene id from one type to another
+mapGeneIDs <- function(query, query_type,
+                        output_types) {
+  library(org.Hs.eg.db)
+  mapped = AnnotationDbi::select(org.Hs.eg.db,
+                  keys = query,
+                  columns = output_types,
+                  keytype = query_type)
+  return(mapped)
+}
+```
+
+```{r}
+library(AnnotationDbi)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene
+set.seed(101)
+
+# get all genes within 500kb near CRE as background
+random_genes <- list()
+for(k in seq(250000, 500000, 50000)){
+  random_sets <- lapply(as.character(gr_peaks_sub), function(i){
+    paired = subsetByOverlaps(genes(txdb), GRanges(i), maxgap = k)
+    mapped = mapGeneIDs(paired$gene_id, "ENTREZID", c("SYMBOL","ENSEMBL"))
+    return(mapped)
+    })
+  random_genes[[as.character(k)]] <- do.call(rbind, random_sets)
+}
+
+
+pops_dir <- "output/pops/test/out/"
+pops <- fread(paste0(pops_dir, "ukb-a-446_pops/ukb-a-446.preds"))
+
+pops_random <-
+  sapply(names(random_genes), function(i) {
+    idx = match(random_genes[[i]]$ENSEMBL, pops$ENSGID)
+    return(cbind(i, pops$PoPS_Score[idx[!is.na(idx)]]))
+  })
+pops_random <- do.call(rbind, pops_random)
+pops_random <- data.frame(method = sprintf("BKG_%sK", 
+                                           as.numeric(pops_random[, 1])/1000),
+                          PoPS = pops_random[, 2])
+scE2G_multiome <- 
+  mapGeneIDs(scE2G_multiome, query_type="SYMBOL", output_types = "ENSEMBL")
+
+pops_scE2G <- pops$PoPS_Score[match(scE2G_multiome$ENSEMBL, pops$ENSGID)]
+
+gginput <- 
+  rbind(pops_random %>% filter(grepl("BKG", method)),
+        data.frame(method = "scE2G genes", 
+                   PoPS = pops_scE2G[!is.na(pops_scE2G)]))
+p2 <-
+ggplot(
+  gginput %>% filter(method %in% c("scE2G genes", "BKG_500K")) %>%
+    mutate(method = 
+             factor(method, 
+                    levels = c("scE2G genes", "BKG_500K"),
+                         labels = c(
+                                    "scE2G\ngenes",
+                                    "background\ngenes"
+                                    ))),
+       aes(y = as.numeric(PoPS),
+           x = method,
+           fill = method)) + 
+  geom_boxplot(outlier.shape = NA, width = 0.5) +
+  geom_jitter(width = 0.2,
+              alpha = 0.4,
+              size = 0.2)  + 
+  theme_pub() + ylim(-1, 5) + 
+  theme(legend.position = "none") + 
+  xlab("") + ylab("PoPS")
+
+p2
+```
+
+```{r}
+# compare mean PoPs scores using t.test
+t.test(as.numeric(gginput$PoPS[gginput$method == "scE2G genes"]),
+       as.numeric(gginput$PoPS[gginput$method == "BKG_500K"]))
+```
+
+### Blood immune eQTLs from Onek1k
+
+```{r}
+EnrichmentTestE2G <- function(eqtl_gr, multiome_gr) {
+  
+  # A function that tests enrichment of eQTL-gene pairs among E2G links with cell types matched and within the same genomic windows
+  
+  eqtl_gr <- eqtl_gr[eqtl_gr$distance <= 100000 & eqtl_gr$distance > 10000]
+  multiome_gr <- multiome_gr[multiome_gr$distance <= 100000 & multiome_gr$distance > 10000]
+  positive_gr <- multiome_gr[multiome_gr$E2G.Score.qnorm >= 0.4]
+  positive_links <- data.frame(peak = as.character(positive_gr),
+                          gene = positive_gr$TargetGene)
+  # matching SNP-gene pairs
+  overlaps <-
+    findOverlaps(eqtl_gr, multiome_gr+250) 
+  overlapped_links <- data.frame(
+    peak = as.character(multiome_gr[overlaps@to]),
+    gene = as.character(eqtl_gr$targetGene[overlaps@from]))
+  
+  out <-
+    EnrichmentTest(unique(paste(positive_links$peak, positive_links$gene, sep = ":")),
+                 unique(paste(overlapped_links$peak, overlapped_links$gene, sep = ":")),
+                 unique(paste(as.character(multiome_gr), multiome_gr$TargetGene, sep = ":")))
+  return(out)
+}
+
+
+```
+
+```{r}
+# p2g_list needs to be built directly from E2G outputs
+eqtl_list <- readRDS("../output/output_dir/remove_dup/oneK1K_finemapped_eQTL.RDS")
+df <- data.frame(eqtl = c("CD4+ TCM cells", 
+                          "CD8+ TRM cells", 
+                          "Naïve B cells", 
+                          "Memory B cells", 
+                          "CD4+ TREG cells",
+                          "CD4+ TRM ITGAE high",
+                          "CD16+ NK cells"),
+                 scE2G = names(p2g_list)[-7])
+enrich_out <-
+  apply(df, 1, function(i) {
+    return(EnrichmentTestE2G(eqtl_list[[i[1]]], p2g_list[[i[[2]]]])[[2]])
+  })
+
+gginput <- data.frame(CellType = df$scE2G, 
+                      do.call(rbind, enrich_out))
+
+q2 <-
+  ggplot(gginput %>% filter(!grepl("B", CellType) & !grepl("Treg", CellType)),
+         aes(
+           y = odds_ratio,
+           x = CellType,
+           fill = CellType)) + 
+    geom_col(width = 0.4) + 
+    geom_errorbar(aes(ymin = conf_low , 
+                      ymax = conf_high),
+                  width = 0.1) + 
+    theme_pub(base_size = 12) + xlab("") + ylab("Enrichment of eQTL-gene pairs \nin E2G links vs. non-E2G links") + 
+    theme(legend.position = "none")
+q2  
+```
+
+
+```{r}
+load("output/peakCalling/peaks_called_by_TissueCellType.RData")
+names(d_major_hg19)[8] <- "Lung_memCD4_T"
+ct_tested <- c("CD4_T", "CD8_T", "Naive_B", "Memory_B", "Treg", "memCD4_T", "CD8.CD4_T", "NK")
+p2g_list <-
+  lapply(ct_tested, function(i){
+    setwd(paste0("output/scE2G/results/u19_multiome_doubletRM/", i))
+    multiome <- fread("multiome_powerlaw_v3/encode_e2g_predictions.tsv.gz")
+    return(GRanges(multiome))
+  })
+names(p2g_list) <- ct_tested
+```
+
+
+```{r}
+library(GenomicFeatures)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(VariantAnnotation)
+
+txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene
+genes_gr <- genes(txdb)
+
+# Load your full variant set once (not per gene — too slow otherwise)
+variants <- fread("~/cluster/projects/u19_multiomics/other_data/scE2G/QTD000625.all.tsv.gz")
+# retain only common variants
+variants <- variants[variants$maf >= 0.05, ] %>% 
+  dplyr::select(chromosome, position, variant, maf, rsid) %>%
+  distinct()
+all_variants <- GRanges(seqnames = paste0("chr", variants$chromosome),
+                        ranges = as.character(variants$position))
+mcols(all_variants) <- variants
+rm(variants)
+
+```
+
+```{r}
+ref <- fread("data/scE2G/tabix_ftp_paths.tsv")
+ftp_path <- 
+  ref %>% filter(study_label == "OneK1K" & quant_method == "ge") %>%
+    filter(sample_group %in% c("B_memory", "B_naive", "CD4_Naive", 
+                               "CD4_TCM", "CD4_TEM", "CD8_Naive",
+                               "CD8_TCM", "CD8_TEM", "NK", "NK_Proliferating", "Treg")) 
+
+eqtl_list <- 
+  lapply(c("B_memory", "B_naive", "CD4", "CD8", "NK", "Treg"), function(i) {
+    idx = grep(i, ftp_path$sample_group)
+    print(idx)
+    eqtl <- c()
+    for(i in idx){
+      f <- fread(paste0("data/scE2G/",
+                        basename(ftp_path$ftp_cs_path[i])))
+      eqtl <- rbind(eqtl, f[f$pip >= 0.3, ])}
+      eqtl <- eqtl[eqtl$variant %in% all_variants$variant] #keep common variants
+      # make a GRange object
+      eqtl$position <-
+        unlist(lapply(eqtl$variant, function(i) {
+          paste(strsplit(i, "_")[[1]][1:2], collapse = ":")
+        }))
+      eqtl_gr <- GRanges(eqtl$position)
+      mcols(eqtl_gr) <- eqtl
+      # convert to gene symbols
+      mapped_genes <- mapGeneIDs(
+        query = eqtl_gr$gene_id,
+        query_type = "ENSEMBL",
+        output_types = "SYMBOL"
+      )
+      eqtl_gr$targetGene <-
+        mapped_genes$SYMBOL[match(eqtl_gr$gene_id, mapped_genes$ENSEMBL)]
+      eqtl_gr <-
+        eqtl_gr[!is.na(eqtl_gr$targetGene) &
+                  eqtl_gr$targetGene %in% proj@geneAnnotation$genes$symbol]
+      # compute the distance of variants to gene body
+      eqtl_gr$distance <-
+        unlist(lapply(seq_along(eqtl_gr), function(i) {
+          gene = proj@geneAnnotation$genes[which(proj@geneAnnotation$genes$symbol == eqtl_gr$targetGene[i])]
+          return(distance(eqtl_gr[i], gene))
+        }))
+    return(eqtl_gr) 
+  })
+names(eqtl_list) <- c("B_memory", "B_naive", "CD4", "CD8", "NK", "Treg")
+```
+
+# Visualize E2G links across cell types
+
+```{r, fig.height = 8, fig.width = 12}
+new_qlf <- readRDS("~output/diff_peak_analysis/cross_celltypes_Lung_lymphOnly_edgeR.RDS")
+names(new_qlf)[7] <- "memCD4_T"
+library(colorRamp2)
+col_fun = colorRamp2(c(0, 0.2, 1), c("blue", "white", "red"))
+p2g_mat <- get_scE2G_mat(multiome_tbl[[2]], cutoff = 0.2)
+row_info <- p2g_mat[, !(colnames(p2g_mat) %in% ct_order)]
+p2g_mat <- as.matrix(p2g_mat[, ct_order])
+rownames(p2g_mat) <- row_info$Label
+```
+
+```{r, fig.width = 12, fig.height = 10}
+#load("../output/u19_multiomics/output/scE2G/scE2G_p2g_asthmaCREs.RData")
+p2g_links <- split(multiome_p2g, multiome_p2g$CellType)
+
+gr_peaks_p2g <-
+  apply(mcols(gr_peaks_sub)[, c("Peak", "CellTypes")], 1, function(i){
+    links <- 
+        lapply(strsplit(i[2], ",")[[1]], function(j){
+          filtered <-   
+          data.frame(p2g_links[[j]]) %>% 
+            dplyr::filter(ref_gr == i[1]) #& E2G.Score.qnorm >= cutoff) 
+          if(nrow(filtered) != 0){
+            filtered %>%
+              mutate(p2g_CellType = j,
+                      Peak = i[1],
+                      Gene = TargetGene) %>%
+              dplyr::select(Peak, p2g_CellType, 
+                            Gene, trait,
+                            E2G.Score.qnorm,
+                            normalizedATAC_enh, RNA_meanLogNorm) #TargetGeneTSS,trait)
+          }
+        })
+      return(do.call(rbind, links))
+  })
+gr_peaks_p2g <- do.call(rbind, gr_peaks_p2g)
+
+# add accessibility levels in logCPM 
+gr_peaks_p2g$PeakAccessibility <-
+  apply(gr_peaks_p2g, 1, function(i){
+    cpm_tbl = new_qlf[[i[2]]]$table
+    qlf_idx = match(gr_peaks_sub$peakID[gr_peaks_sub$Peak == i[1]], 
+                    rownames(cpm_tbl))
+    return(cpm_tbl$logCPM[qlf_idx] + cpm_tbl$logFC[qlf_idx])
+})
+
+p2g_tbl <- 
+  gr_peaks_p2g %>% 
+   mutate(
+     PeakStart = unlist(lapply(Peak, function(i){strsplit(i, "-")[[1]][1]})),
+     cutLabel = paste(PeakStart, Gene, sep = "_"),
+     Label = paste(Peak, Gene, sep = "_"),
+     CellType = p2g_CellType) %>%
+    filter(cutLabel %in% rownames(p2g_mat)) %>%
+      dplyr::select(cutLabel, trait, Label, CellType, Peak, E2G.Score.qnorm, normalizedATAC_enh, RNA_meanLogNorm)
+```
+
+## Visualize significant links and significant peaks  
+
+```{r, fig.width = 10}
+highlighted <- 
+  unique(
+    c(p2g_tbl %>% 
+      filter(trait == "aoa") %>%
+      filter(RNA_meanLogNorm >= quantile(RNA_meanLogNorm, 0.25)) %>% pull(cutLabel),
+      p2g_tbl %>% 
+      filter(trait == "coa") %>%
+      filter(RNA_meanLogNorm >= quantile(RNA_meanLogNorm, 0.25)) %>% pull(cutLabel))
+)
+p2g_summary <- multiome_tbl[[2]] %>% 
+  mutate(
+    PeakStart = unlist(lapply(Peak, function(i){strsplit(i, "-")[[1]][1]})),
+    toshow = paste(PeakStart, Gene, sep = "_"),
+    Label = paste(Peak, Gene, sep = "_")) %>%
+    filter(toshow %in% highlighted)
+
+p2g_summary$PeakAccessibility <-
+  apply(p2g_summary, 1, function(i){
+    cpm_tbl = new_qlf[[i[2]]]$table
+    qlf_idx = match(gr_peaks_sub$peakID[gr_peaks_sub$Peak == i[1]], 
+                    rownames(cpm_tbl))
+    return(cpm_tbl$logFC[qlf_idx])#cpm_tbl$logCPM[qlf_idx] + )
+})
+```
+```{r fig.height = 8, fig.width = 10}
+toshow <- which(rownames(p2g_mat) %in% highlighted)
+library(colorRamp2)
+col_fun = colorRamp2(c(0, 0.2, 1), c("blue", "white", "red"))
+new_legend <-
+  lapply(rownames(p2g_mat), function(i) {
+    row = strsplit(i, "_")[[1]]
+    gene = row[2]
+    start = strsplit(row[1], "-")[[1]][1]
+    return(paste(start, gene, sep="_"))})
+rownames(p2g_mat) <- new_legend
+colnames(p2g_mat) <- gsub("[.]", "/", colnames(p2g_mat))
+p2g_mat_binary <- apply(p2g_mat, 2, function(i){as.numeric(i >= 0.2)})
+rownames(p2g_mat_binary) <- rownames(p2g_mat)
+p2g_heatmap <-
+  Heatmap(
+          #p2g_mat_binary[toshow, ], 
+          p2g_mat_binary,
+          row_split = row_info$trait,#[toshow],
+          cluster_columns = FALSE,
+          row_names_side = "left",
+          show_row_dend = FALSE,
+          column_names_rot = 45,
+          name = "scE2G scores",
+          na_col = "grey",
+          row_title = c("AOA", "COA"),
+          #left_annotation = row_ha,
+          col = col_fun,
+          width = nrow(p2g_mat)*unit(1.5, "mm"))
+
+
+p2g_heatmap
+```
+
+## Visualize with bubble plot
+```{r}
+prioritized <- unlist(lapply(rownames(p2g_mat), function(i){
+  strsplit(i, "_")[[1]][2]}))
+```
+
+Bubble plot to show final target genes of asthme CREs
+
+```{r, fig.height = 6, fig.width = 5}
+# get the ordered CREs from heatmap
+CRE_order <- rownames(p2g_mat_binary)[unlist(row_order(draw(p2g_heatmap)))]
+
+df <- p2g_tbl %>% filter(cutLabel %in% CRE_order) %>%
+      mutate(
+      cutLabel = factor(cutLabel, levels = rev(CRE_order)),
+      CellType =
+        factor(CellType,
+               levels = ct_order,
+               labels = gsub("[.]", "/", ct_order)))
+p3 <-
+ggplot(
+  df,
+  aes(
+    y = cutLabel,
+    x = CellType,
+    size = normalizedATAC_enh,
+    colour = E2G.Score.qnorm)) +
+  scale_colour_gradient(low = "white", high = "red", limits = c(0, 1))  + 
+  scale_size_continuous() +
+  geom_point() + 
+  xlab("") + ylab("") + 
+  theme_pub() + 
+  theme(axis.text.x = element_text(size = 10, angle = 45, vjust = 0.55)) + 
+       # panel.background = element_rect(fill = "#eeeeee", colour = "grey10")) +
+  labs(color = "scE2G score",
+         size = "Peak Accessibility") #bulk
+
+```
+
+```{r}
+# A summary table for the final list of CRE and target genes
+highlighted <- p2g_summary %>% 
+  filter(E2G.Score.qnorm >= 0.2) %>%
+  mutate(E2G.Score.qnorm = round(E2G.Score.qnorm, 2))
+final_tbl <-
+  lapply(split(highlighted, highlighted$Label), function(i) {
+    apply(i[, c("E2G.Score.qnorm", "CellType")], 2, function(j){paste(j, collapse = ",")})
+  })
+final_tbl <- data.frame(
+  pair = names(final_tbl),
+  do.call(rbind, final_tbl),
+  row.names = NULL)
+                        
+write.table(final_tbl, "output/asthma_CRE_p2g_links_final_list.txt", quote = F, row.names = F, sep = "\t")
+```
+
+
+```{r}
+
+ggplot(
+  p2g_summary %>% mutate(Beta = E2G.Score.qnorm) %>%
+    filter(Label %in% rownames(p2g_mat) & RNA_meanLogNorm >= 0.08) %>%
+    mutate(
+      p2g_CellType =
+        factor(p2g_CellType,
+               levels = ct_order),
+      Label = factor(Label,
+                     levels = rev(rownames(p2g_mat)[toshow][unlist(row_order(draw(p2g_heatmap)))]))
+      
+    ),
+  aes(
+    y = Label,
+    x = p2g_CellType,
+    size = Beta,
+    colour = PeakAccessibility
+  )
+) +
+  scale_colour_viridis_b() +
+  scale_size_continuous() +
+  geom_point() + xlab("") + ylab("") 
+```
+
+
