@@ -20,7 +20,7 @@ ct_order <-
   "CD4_T",
   "Treg"
 )
-pal_atac <- readRDS("~/projects/Lung_scMultiomics_paper/data/color_codes.RDS")
+pal_atac <- readRDS("data/color_codes.RDS")
 pal_rna <- pal_atac[c(2, 4:8)]
 source("../code/make_plots.R")
 ```
@@ -81,7 +81,7 @@ ggplot(nTargets_tbl %>%
 
 
 ```{r, fig.width = 12}
-data_dir = "/home/jinggu/cluster/projects/u19_multiomics/analyses/remove_dup/dictys"
+data_dir = "output/dictys"
 
 lung_grn <-
   lapply(ct_order, function(i) {
@@ -149,13 +149,13 @@ EnrichmentTest <- function(var1, var2, bkg){
 }
 ```
 
-# load data
+## Validate GRNs with several analyses
 
 ```{r}
-f_markers <- read.csv("../output/lung_GRN_regulatory_markers.csv")
-f_TFs <- read.csv("../output/lung_GRN_TFs.csv", row.names = 1)
+f_markers <- read.csv("output/lung_GRN_regulatory_markers.csv")
+f_TFs <- read.csv("output/lung_GRN_TFs.csv", row.names = 1)
 # test whether lung up-regulated genes enriched for regulatory markers in lung immune cells
-marker_expr <- fread("../output/u19_multiomics/output/DE_analysis_wilcox/CD8_T_DE_results.csv")
+marker_expr <- fread("output/u19_multiomics/output/DE_analysis_wilcox/CD8_T_DE_results.csv")
 DGE_tbl <- do.call(rbind, btw_tissue)
 DGE_tbl$cluster <- unlist(lapply(rownames(DGE_tbl), function(i){strsplit(i, "[.]")[[1]][1]}))
 DGE_tbl$gene <- unlist(lapply(rownames(DGE_tbl), function(i){strsplit(i, "[.]")[[1]][2]}))
@@ -168,119 +168,7 @@ sub_DGE <-
                                  abs(avg_log2FC) < 0.58 ~ "Not Significant"))
 ```
 
-
-```{r}
-
-# for(c in cutoffs){
-#   print(c)
-#   lung_grn <-
-#     lapply(ct_order, function(i) {
-#       f <- fread(sprintf("../analysis/dictys/sparsity%s/L_%s_GRN.txt", c, i))
-#       f_pos <- f[f$Strength > 0, ]
-#       return(lapply(split(f_pos, f_pos$Regulator), function(i){i$Target}))
-#     })
-#   names(lung_grn) <- paste("L", ct_order, sep="_")
-#   target_pos[[as.character(c)]] <- lung_grn
-# }
-# for(c in cutoffs){
-#   print(c)
-#   lung_grn <-
-#     lapply(ct_order, function(i) {
-#       f <- fread(sprintf("../analysis/dictys/sparsity%s/L_%s_GRN.txt", c, i))
-#       f_neg <- f[f$Strength < 0, ]
-#       return(lapply(split(f_neg, f_neg$Regulator), function(i){i$Target}))
-#     })
-#   names(lung_grn) <- paste("L", ct_order, sep="_")
-#   target_neg[[as.character(c)]] <- lung_grn
-# }
-f <- fread(sprintf("%s/sparsity0.015/L_CD8_T_GRN.txt", data_dir))
-tf <- f %>% filter(Regulator %in% c("CEBPA", "BATF3", "TBX21", "PRDM1", "LEF1", "TCF7"))
-ggplot(tf, aes(x = Strength)) + geom_histogram() + facet_grid(Regulator ~.)
-
-```
-
-### CD8+ T marker TFs enriched for DE genes compared to random genes
-
-```{r}
-set.seed(101)
-ct <- "L_CD8_T"
-#marker_expr <- fread(sprintf("../output/u19_multiomics/output/DE_analysis_wilcox/%s_DE_results.csv", gsub("L_", "", ct)))
-#marker_expr <- fread("~/cluster/projects/u19_multiomics/output/DE_analysis_wilcox/Memory_B_cells_DE_results.csv")
-colnames(marker_expr)[1] <- "gene"
-known_TFs <- c("RUNX3", "TBX21", "EOMES", "IRF4", "BACH2", "TCF7", "E2F1", "BATF3")
-DEGenes <- 
-  marker_expr %>% 
-    #mutate(gene = rownames(marker_expr)) %>%
-    filter(p_val_adj <= 0.05 & avg_log2FC >= 0.58) %>%
-    pull(gene)
-
-enrich_out <- 
-  lapply(names(target_list), function(i) {
-    f_markers <- fread(sprintf("~/projects/Lung_scMultiomics_paper/analysis/dictys/sparsity%s/lung_GRN_regulatory_markers.csv", i))
-    markers <- f_markers$RegMarker[f_markers$CellType == ct]
-    print(markers)
-    out = c()
-    for(j in markers) {
-        target <- unique(target_list[[i]][[ct]][[j]])
-        random <- sample(all_genes[[gsub("L_", "", ct)]], length(target))
-        targetDE <- intersect(target, DEGenes)
-        randomDE <- intersect(random, DEGenes)
-        out = rbind(out, c(length(targetDE), length(randomDE), length(targetDE)/length(randomDE)))
-    }
-    colnames(out) <- c("nTargetDE", "nRandomDE", "Enrichment")
-    return(data.frame(out, TF = markers, cutoff = i))
-  })
-
-enrich_out <-
-  do.call(rbind, enrich_out) %>% 
-    na.replace(0) %>%
-    mutate(Enrichment = ifelse(is.infinite(Enrichment), 
-                               max(Enrichment[!is.infinite(Enrichment)]), 
-                               Enrichment))
-
-count_tbl <- 
-  enrich_out %>% 
-    group_by(cutoff) %>% 
-      summarise(numEnriched= sum(Enrichment > 1),
-                numNotEnriched = sum(Enrichment < 2)) %>%
-      rowwise() %>%
-      mutate(totalTFs = sum(c_across(c(numEnriched, numNotEnriched))),
-             propEnriched = numEnriched/totalTFs,
-             propNotEnriched = numNotEnriched/totalTFs)
-
-
-ggplot(
-  enrich_out,
-  aes(x = Enrichment,
-      fill = cutoff)) +
-  geom_vline(xintercept = 1, type = "dashed") + 
-  geom_histogram(alpha = 0.7) + 
-  facet_grid(cutoff ~.) + 
-  theme_bw(base_size = 13) + 
-  #ggtitle("CD4+ T marker TFs") + 
-  theme(legend.position = "none")
-  
-```
-
-The sparsity cutoff at 0.015 gives relatively higher number regulatory TFs without much sacrifice in enrichment.
-
-```{r, fig.width = 8}
-ct = "L_CD8_T"
-toshow = enrich_out$TF[enrich_out$Enrichment > 2 & enrich_out$Enrichment <=6 | enrich_out$TF %in% known_TFs]
-
-ggplot(
-  enrich_out %>% filter(TF %in% toshow),
-  aes(x = TF,
-      y = Enrichment,
-      fill = cutoff)) + 
-  geom_col(position = "dodge2", alpha = 0.7) + 
-  theme_bw(base_size = 15) + 
-  geom_hline(yintercept = 1) + 
-  xlab("")
-
-```
-
-### Comparing TF regulators between cell types
+### Known lineage TFs show larger DE and DR values
 
 ```{r, fig.width = 8, fig.height = 8}
 library(ggrepel)
@@ -306,8 +194,6 @@ for(i in c(0.015)){
 
 ```
 
-TFs important for memory_B compared to CD4_T
-
 ```{r}
 select_TFs <-
   lapply(cutoffs, function(i) {
@@ -321,6 +207,8 @@ select_TFs <-
   })
 
 ```
+
+### Testing enrichment of DE genes among target genes of marker TFs
 
 ```{r, fig.height = 8}
 set.seed(101)
@@ -359,12 +247,6 @@ count_tbl
 ```
 
 ```{r}
-# known CD8+T TFs
-#known_TFs <- c("RUNX3","PRDM1", "ZNF683","NR4A1", "NR4A1", "NR4A2", "NR4A3", "NFKB2", "PDCD1", "TBX21", "EOMES", "IRF4", "BACH2", "TCF7", "E2F1", "BATF3")
-# known MemB TFs
-# known_TFs <- c("TBX21", "BCL6", "HHEX", "TLE3", "MEF2B", "MEF2C", "TCF3","BACH2", "PRDM1", "ZEB2")
-# activation_TFs <- c("IRF4", "IRF8", "MYC", "MEF2B", "MEF2C", "POU2AF1", "TCF3", "TCF4", "HHEX")
-
 # known CD4+ TFs
 known_TFs <- c("TCF7", "BACH2", "KLF2", "LEF1","TBX21", "BCL6", "FOXP3", "BATF3", "RUNX3", "ZBTB7B", "RORC", "GATA3", "PRDM1", "STAT6", "STAT3", "STAT3", "IRF4", "EOMES", "AHR")
 toshow = enrich_out$TF[p.adjust(enrich_out$p_value, method = "fdr") <= 0.05]
@@ -392,200 +274,11 @@ x %>%
 )
 ```
 
-### check for enrichment significance
+## Applying lung GRNs to asthma genetics
 
 ```{r}
-ct = "L_Memory_B"
-out_tbl = c()
-for(j in markers) {
-    target <- unique(target_list$`0.015`[[ct]][[j]])
-    random <- sample(all_genes[[gsub("L_", "", ct)]], length(target), replace = FALSE)
-    out_tbl = rbind(out_tbl, EnrichmentTest(target, DEGenes, all_genes[[gsub("L_", "", ct)]]))
-}
-rownames(out_tbl) <- markers
-toshow = out_tbl[p.adjust(out_tbl$p_value, method = "fdr") <= 0.1, ]
-
-ggplot(
-  out_tbl %>% filter(TF %in% toshow),
-  aes(x = TF,
-      y = odds_ratio,
-      fill = cutoff)) + 
-  geom_hline(yintercept = 2) + 
-  geom_col(position = "dodge2", alpha = 0.8) + 
-  theme_bw(base_size = 15) + xlab("")
-```
-
-### Validate with consistency of TF effects
-
-```{r}
-f <- fread(sprintf("%s/sparsity%s/L_CD4_T_Memory_B_DE_DR_logFC.txt", data_dir, 0.015))
-colnames(f)[1] <- "gene"
-markers <- 
-  f %>% filter(
-    DE_logFC <= -0.58 & DR_logFC <= -0.58) %>%
-  pull(gene)
-grn <- fread(sprintf("%s/sparsity%s/L_%s_GRN.txt", data_dir, 0.015, "CD4_T"))
-sign_tbl <-  
-  grn %>% 
-      filter(Regulator %in% markers) %>%
-      group_by(Regulator) %>%
-      dplyr::summarise(proportion = sum(Strength > 0)/n())
-saveRDS(sign_tbl, "../plots/CD4T_regulators_effects_direction.RDS")
-ggplot(
-  grn %>% 
-    filter(Regulator %in% markers) %>%
-    group_by(Regulator) %>%
-    dplyr::summarise(proportion = sum(Strength > 0)/n()),
-  aes(x = Regulator,
-      y = proportion)) + 
-  geom_point() + 
-  ylab("Percent of positive links") + 
-  geom_hline(yintercept = 0.5) + 
-  theme_ArchR(baseSize = 15, xText90 = TRUE)
-```
-
-A binomial test
-
-```{r}
-binom.test(21, 24, p = 0.5)
-```
-
-### Do marker TFs tend to be more up-regulated in lung
-
-```{r}
-cutoff = "0.02"
-fc_cutoff = 0.58
-# get important TFs for CD4+ T subsets
-f <- fread(sprintf("../analysis/dictys/sparsity%s/L_CD4_T_Memory_B_DE_DR_logFC.txt", cutoff))
-colnames(f)[1] <- "gene"
-regTFs <- c()
-regTFs <- rbind(regTFs,
-  f %>% filter(DE_logFC <= -fc_cutoff & DR_logFC <= -fc_cutoff) %>%
-    mutate(CellType = "CD4_T"),
-  f %>% filter(DE_logFC > fc_cutoff & DR_logFC > fc_cutoff) %>%
-    mutate(CellType = "Memory_B")) 
-
-btw_tissue <- readRDS("../output/u19_multiomics/output/DE_analysis_wilcox/cross_tissue_DE_wilcox.RDS")
-
-DGE_tbl <- do.call(rbind, btw_tissue)
-DGE_tbl$cluster <- unlist(lapply(rownames(DGE_tbl), function(i){strsplit(i, "[.]")[[1]][1]}))
-DGE_tbl$gene <- unlist(lapply(rownames(DGE_tbl), function(i){strsplit(i, "[.]")[[1]][2]}))
-
-gginput <-
-    DGE_tbl %>% filter(cluster != "Other" & p_val_adj <= 0.05) %>%
-        mutate(group = case_when(avg_log2FC >= 0.58 ~ "Lung Up-regulated", 
-                                 avg_log2FC <= -0.58 ~ "Spleen Up-regulated",
-                                 abs(avg_log2FC) < 0.58 ~ "Not Significant"))
-lung_up <- gginput[gginput$group == "Lung Up-regulated", ]
-lungTFs <-
-  lapply(c("CD4_T", "Memory_B"), function(i) {
-    intersect(regTFs$gene[regTFs$CellType == i], lung_up$gene[lung_up$cluster == i])
-  })
-names(lungTFs) <- c("CD4_T", "Memory_B")
-lungTFs
-# Cross-tissue DE genes in CD4_T more enriched in regTFs compared to any random genes
-enrich_out <-
-  lapply(c("CD4_T", "Memory_B"), function(i) {
-    EnrichmentTest(var1 = regTFs$gene[regTFs$CellType == i],
-                   var2 = lung_up$gene[lung_up$cluster == i],
-                   bkg = names(target_list$`0.02`[[i]]))
-  })
-names(lungTFs) <- c("CD4_T", "Memory_B")
-overlapped <-  unlist(lapply(lungTFs, function(i){paste(i, collapse = ",")}))
-
-out_tbl <-
-  do.call(rbind, enrich_out) %>%
-    mutate(CellType = names(lungTFs),
-           DEGenes =  unlist(lapply(lungTFs, function(i){paste(i, collapse = ",")})),
-           FDR = format(p.adjust(p_value, method = "fdr"), 
-                        scientific = TRUE,
-                        digit = 2)) %>%
-    dplyr::select(CellType, odds_ratio, p_value, FDR, DEGenes)
-
-
-# Target genes of CD4T regulators more enriched for lung-up genes?
-enrich_out <-
-  lapply(regTFs$gene[regTFs$CellType == "CD4_T"], function(i) {
-    target <- unique(target_list$`0.02`$CD4_T[[i]])
-    out_tbl = EnrichmentTest(target, lung_up$gene, all_list$`0.02`$CD4_T)
-    return(data.frame(out_tbl, TF = i))
-  })
-
-enrich_out <-
-  do.call(rbind, enrich_out) %>% 
-    na.replace(0) %>%
-  mutate(FDR = p.adjust(p_value, method = "fdr")) %>%
-  filter(FDR <= 0.1 & odds_ratio > 1)
-
-enrich_out
-```
-
-Make it stronger case by examining effect size between TF regulation and DE genes
-
-```{r}
-grn_tbl <- fread("../analysis/dictys/sparsity0.02/L_CD4_T_GRN.txt")
-par(mfrow = c(2,3))
-out_tbl <- c()
-for(i in enrich_out$TF){
-  grn_sub <-
-    grn_tbl %>% filter(Regulator == i & Strength > 0) %>%
-      dplyr::select(Target, Strength)
-  common <- intersect(grn_sub$Target, lung_up$gene[lung_up$cluster == "CD4_T"])
-  grn_sub <- grn_sub[grn_sub$Target %in% common, ]
-  #DE_genes <- gginput %>% filter(cluster == "CD4_T" & gene %in% common)
-  DE_genes <- lung_up %>% filter(cluster == "CD4_T" & gene %in% common)
-  grn_sub$DE <- DE_genes$avg_log2FC[match(common, DE_genes$gene)]
-  if(nrow(grn_sub) < 3) {
-    next
-  }
-  model = lm(grn_sub$DE ~ grn_sub$Strength)
-  out_tbl = rbind(out_tbl, c(i, round(coef(summary(model))[2, ], 2)))
-  coeff = as.numeric(coefficients(model))
-  plot(x = grn_sub$Strength, y = grn_sub$DE,
-       xlab="", ylab="", cex = 0.8,
-       main = i, cex.axis = 1.5,
-       pch = 20)
-  abline(a = coeff[1], b = coeff[2])
-}
-
-```
-```{r}
-write.table(
-gginput %>% 
-  group_by(TF) %>% 
-    dplyr::summarise(Kendall_tau = cor(Strength, DE_logFC, method = "kendall")),
-"../tables/CD4T_strength_vs_logFC_btw_tissue_kendall_tau.txt", quote = F, row.names = F, sep = "\t")
-```
-
-```{r}
-View(out_tbl)
-```
-
-```{r}
-## make ggplot input
-gginput <- c()
-for(i in enrich_out$TF){
-  common <- intersect(target_list$`0.02`$CD4_T[[i]], lung_up$gene[lung_up$cluster == "CD4_T"])
-  grn_sub <-
-    grn_tbl %>% filter(Regulator == i & Target %in% common) %>%
-      dplyr::select(Target, Strength)
-  DE_genes <- lung_up %>% filter(cluster == "CD4_T" & gene %in% common)
-  grn_sub$DE_logFC <- DE_genes$avg_log2FC[match(common, DE_genes$gene)]
-  gginput <- rbind(gginput, data.frame(grn_sub, TF = i))
-}
-gginput <- 
-  left_join(gginput,
-    gginput %>% 
-    group_by(TF) %>% 
-      dplyr::summarise(Kendall_tau = cor(Strength, DE_logFC, method = "kendall")))
-
-```
-
-## GRN application in asthma
-
-```{r}
-aoa <- read.table("../data/aoa_gene_scores.txt", header = T)
-coa <- read.table("../data/coa_gene_scores.txt", header = T)
+aoa <- read.table("data/aoa_gene_scores.txt", header = T)
+coa <- read.table("data/coa_gene_scores.txt", header = T)
 gene_scores <- 
   rbind(data.frame(aoa[aoa$Score >= 0.4, ], Trait = "aoa"),
         data.frame(coa[coa$Score >= 0.4,], Trait = "coa"))
@@ -629,21 +322,18 @@ selectedTFs <-
 p3 <-
 ggplot(rbind(asthma_out %>% filter(TF %in% selectedTFs),
              tf_tbl %>% filter(TF %in% selectedTFs)),
-       # %>%mutate(TF = factor(TF, levels= c("IRF1", 
-       #                               "MTF1", "STAT2", "STAT3",
-       #                               "RELB", "REL"))),
   aes(x = TF,
       y =  factor(CellType, levels = ct_order[ct_order!= "Other"]),
       color  = -log10(as.numeric(p_value)),
       size = odds_ratio)) + 
   geom_point() + xlab("") + ylab("") + 
-  #geom_text(nudge_y = 0.2, size = 5) + 
   scale_y_discrete(limits = rev(ct_order)) +
   labs(color = "-log10(p-val)") + 
   theme_pub() + 
   theme(legend.position = 'bottom')
 p3
 ```
+
 ```{r}
 ggsub <- gginput %>% filter(FDR <= 0.1)
 genesets <-
@@ -670,11 +360,11 @@ idx <- which(names(target_list$`0.02`$Treg) == "GATA3")
 intersect(target_list$`0.02`$Treg[[idx]], gene_scores$Gene)
 ```
 
+## Identify functions of target genes with GSEA
 
 ```{r}
+
 asthma_tfs <- c("BACH2", "IRF1" ,"GATA3","SMAD3","TBX21","CEBPA","CEBPG", "STAT6")
-#DE_tissue <- c("GATA3", "HSF4", "JUNB", "PBX1", "STAT3", "TEAD1")
-#putative_tfs <- paste(tf_tbl$CellType, rownames(tf_tbl), sep = ":")
 genesets <- 
   lapply(asthma_tfs, function(i){
     targets <-
@@ -689,19 +379,13 @@ genesets <-
     saveRDS(bkgsets, sprintf("%s/%s_bkgsets.RDS", data_dir, i))
   })
 names(genesets) <- putative_tfs
-saveRDS(tf_targets[!unlist(lapply(tf_targets, is.null))],
-        "/home/jinggu/cluster/projects/u19_multiomics/output/GO_enrichment/GRN/putative_asthma_TF_targets.RDS")
 
 bkgGenes <- lapply(tf_tbl$CellType, function(i){
-  all_list$`0.02`[[i]]
+  all_list$`0.015`[[i]]
 })
-save(genesets, bkgGenes, file = "~/cluster/projects/u19_multiomics/output/GO_enrichment/GRN/putative_asthma_TFs.RData")
-
-bkg <- read.table("../output/all_targets_L_GRN.txt")
-saveRDS(bkg$V1, "~/cluster/projects/u19_multiomics/output/GO_enrichment/GRN/bkg_TF_targets.RDS")
 ```
 
-### GRNs used to identify functions of regulated genes of asthma TFs
+### Visualize results using bubble plot
 
 ```{r}
 library(scales)
@@ -746,12 +430,8 @@ ggplot(
     theme_pub() + 
     theme(axis.text.x = element_text(angle = 45, vjust = 0.5))
 ```
+
 ```{r}
-       # TF = factor(k, levels = c("CD4_T:GATA3",
-        #                           "Naive_B:IRF1",
-        #                           "CD4_T:STAT1",
-        #                           "Naive_B:STAT2",
-        #                           "CD4_T:TFDP1")),
 df <-
   go_tbl %>% filter(description %in% toshow) %>%
        mutate(
@@ -836,12 +516,12 @@ View(
 )
 ```
 
-common genes across immune activation GO terms from STAT6 regulated genes
+### Lung GRNs show variability in networks of the same TF across cell types
 
 ```{r, fig.height = 15}
 library(ComplexHeatmap)
 library(circlize)
-grn_tbl <- fread("~/projects/Lung_scMultiomics_paper/analysis/dictys/sparsity0.02/L_Treg_GRN.txt")
+grn_tbl <- fread("output/sparsity0.015/L_Treg_GRN.txt")
 STAT6_genes <-
   go_tbl %>% 
       filter(grepl("Biological", database) &
@@ -878,26 +558,14 @@ Heatmap(t(mat),
           title_gp = gpar(fontsize = 14)))
 ```
 
-### check whether asthma risk genes enriched in STAT6 network
 
-```{r}
-gene_set <- gene_scores$Gene
-out_tbl <-
-    lapply(names(target_list$`0.02`), function(i){
-      target = unique(target_list$`0.02`[[i]][["STAT6"]])
-      return(EnrichmentTest(var1 = target, var2 = gene_set, bkg = all_list$`0.02`[[ct]])[[2]])
-    })
-out_tbl <- do.call(rbind, out_tbl)
-rownames(out_tbl) <- names(target_list$`0.02`)
-```
+## Identify master regulators for asthma
 
-
-## Identifying master regulators for asthma
+Master regulators are defined as TFs that target significantly more asthma risk genes than expected by chance.
 
 ```{r}
 
 # Other option: testing all marker TFs with 100 or more targets
-#novel_TFs <- tf_tbl$TF[tf_tbl$FDR <= 0.15]
 sparsity = "0.015"
 idx <- which(sapply(target_list[[sparsity]][["CD4_T"]], function(i){length(i) >= 100}) == TRUE)
 regTFs <- unique(names(target_list[[sparsity]][["CD4_T"]])[idx])
@@ -947,26 +615,6 @@ ggplot(tf_tbl %>%
   theme_pub(base_size = 12)
 ```
 
-```{r}
-#genes <- c("STAT4", "TCF7", "NFIA", "RARG", "ETV7", "STAT3")
-genes <- strsplit("TCF7, NFYB, IRF8, E2F7", ", ")[[1]]
-genesets <-
-  apply(regTFs[regTFs$gene %in% genes, ], 1, function(i){
-    genes = target_list$`0.02`[[paste0("L_", i[5])]][[i[1]]]
-    return(genes)
-  })
-names(genesets) <- genes
-bkgGenes <-
-   apply(regTFs[regTFs$gene %in% genes, ], 1, function(i){
-      genes = all_genes[[i[5]]]
-    return(genes)
-  })
-
-genesets <- list(TCF7 = target_list$`0.02`$L_CD4_T$TCF7)
-bkgGenes <-list(TCF7 = all_genes$CD4_T)
-save(genesets, bkgGenes, file = "~/cluster/projects/u19_multiomics/output/GO_enrichment/GRN/master_regulators_sig.RData")
-```
-
 ### GO enrichment results for target genes of master regulators
 
 ```{r}
@@ -998,637 +646,3 @@ for(i in names(genesets)){
 
 ```
 
-find evidence supporting CREs of target genes linked to TCF7
-
-Identifying TCF7-GATA3 links?
-One peak that contains TCF7 motif in footprints of GATA3 promoters
-```{r}
-#unlist(lapply(target_list, function(i) {"TCF7" %in% i$GATA3}))
-unlist(lapply(target_list, function(i) {"GATA3" %in% i$TCF7}))
-
-gata3_peaks <-proj@peakSet[which(proj@peakSet$nearestGene == "GATA3")]
-gata3_motif <- subsetByOverlaps(motifs_gr, gata3_peaks)
-gata3_motif[grepl("TCF7", gata3_motif$TF)]
-gata3_ftprints <- subsetByOverlaps(foot_gr, gata3_peaks)
-gata3_ftprints
-```
-
-
-```{r}
-focal_tf = "TCF7"
-motifs <- fread("~/cluster/projects/u19_multiomics/dictys/output/CD4_T/motifs.bed")
-footprints <- fread("~/cluster/projects/u19_multiomics/dictys/output/CD4_T/footprints.bed")
-targets <- intersect(target_list$`0.02`$L_CD4_T[[focal_tf]], "GATA3")
-motifs_gr <- GRanges(seqnames = motifs$V1,
-                     IRanges(start = motifs$V2,
-                             end = motifs$V3),
-                     TF = motifs$V6)
-foot_gr <- GRanges(seqnames = footprints$V1,
-                   IRanges(start = footprints$V2,
-                           end = footprints$V3))
-peaks <- gr_peaks_sub[gr_peaks_sub$nearestGene %in% targets]
-
-# check whether CRE contains TCF7 motif
-# paired<-findOverlaps(motifs_gr, peaks, type = "within")
-# motifs_gr <- motifs_gr[paired@from[grepl(focal_tf, motifs_gr[paired@from]$TF)]]
-# 
-# paired<-findOverlaps(foot_gr, peaks, type = "within")
-# foot_gr <- foot_gr[paired@from[paired@to == 2]]
-
-multiome_p2g <- readRDS("../output/u19_multiomics/output/scE2G_multiome_p2g_list_final.RDS")
-p2g_tbl <- data.frame(multiome_p2g[which(multiome_p2g$TargetGene %in% c("CCR7", "SMARCE1", "TNS4")), ]) %>% dplyr::select(peakID, TargetGene) %>% distinct()
-loop_gr <- proj@peakSet[p2g_tbl$peakID]
-gene_info <-
-  apply(p2g_tbl, 1, function(i){
-    idx <- which(proj@geneAnnotation$genes$symbol == i[2])
-    return(data.frame(mcols(proj@geneAnnotation$genes)[idx,], 
-                      promoter = end(proj@geneAnnotation$genes[idx])))
-  })
-mcols(loop_gr) <- do.call(rbind, gene_info)
-loop_gr$value = 0
-loop_gr$value[which(start(loop_gr) == start(peaks)[2])] = 1
-end(loop_gr)[start(loop_gr) <= loop_gr$promoter] <- loop_gr$promoter[start(loop_gr) <= loop_gr$promoter]
-start(loop_gr)[start(loop_gr) > loop_gr$promoter] <- loop_gr$promoter[start(loop_gr) > loop_gr$promoter]
-```
-
-```{r}
-p <- plotBrowserTrack(
-    ArchRProj = proj[proj@cellColData$Tissue == "Lung"],
-    useGroups = "CD4_T",
-    features = GRangesList("peaks" = getPeakSet(proj),
-                           "motifs" = motifs_gr,
-                           "footprints" = foot_gr),
-    pal = pal_atac[4],
-    groupBy = "PredCellType", 
-    geneSymbol = "CCR7", 
-    loops = loop_gr,
-    upstream = 100000,
-    downstream = 100000,
-    sizes = c(2,3,2,4),
-    baseSize = 9,
-    facetbaseSize = 12
-) 
-```
-
-```{r}
-grid.newpage()
-grid::grid.draw(p$CCR7)
-```
-
-Enrichment analyses for peaks with TCF7 motifs
-
-The motif file in Dictys outputs was limited to peaks with footprints. Use the motif enrichment in ArchR pipeline instead. 
-```{r}
-library(BSgenome.Hsapiens.UCSC.hg38)
-load("../output/u19_multiomics/output/peakCalling/peaks_called_by_TissueCellType.RData")
-proj <- addMotifAnnotations(ArchRProj = proj, motifSet = "cisbp", name = "Motif", force = TRUE)
-pSet <- getPeakSet(ArchRProj = proj)
-pSet$name <- paste(seqnames(pSet), start(pSet), end(pSet), sep = "_")
-matches <- getMatches(ArchRProj = proj, name = "Motif")
-rownames(matches) <- paste(seqnames(matches), start(matches), end(matches), sep = "_")
-matches <- matches[pSet$name]
-# find peaks with TCF7 motifs
-idx = grep("TCF7", colnames(matches))[1]
-peak_set <-pSet[which(matches@assays@data@listData$matches[, idx] == TRUE)]
-sub_pSet <- subsetByOverlaps(peak_set, d_major$Lung_CD4_T, type = "equal")
-coa <- readRDS("~/cluster/projects/u19_multiomics/data/coa_gp3_finemapping_gwas_L5.rds")
-coa_gr <- GRanges(seqnames = paste0("chr", coa$chr),
-                IRanges(start = coa$pos,
-                        end = coa$pos+1),
-                pval = coa$pval)
-ch=import.chain("~/resources/genomes/chain_files/hg19ToHg38.over.chain")
-seqlevelsStyle(coa_gr) <- "UCSC"
-snp_gr <- unlist(liftOver(coa_gr, ch))
-snpInMotif <- snp_gr[findOverlaps(snp_gr, sub_pSet + 250, type = "within")@from]
-snpAll <- subsetByOverlaps(snp_gr, sub_pSet + 500000, type = "within")
-snpOutMotif <- snpAll[setdiff(1:length(snpAll), findOverlaps(snpInMotif, snpAll)@to)]
-snpOutMotif <- subsetByOverlaps(snpOutMotif, d_major$Lung_CD4_T)
-
-plot(y = -log10(sort(snpOutMotif$pval)), 
-     x = -log10((1:length(snpOutMotif))/length(snpOutMotif)),
-     xlab = "-log10(Expected p-value)", ylab = "-log10(Observed p-value)",
-     main = "SNPs in peaks with (red) or without TCF7 motif (black")
-points(y = -log10(sort(snpInMotif$pval)),
-      x = -log10(1:length(snpInMotif$pval)/length(snpInMotif)),
-      col = "red")
-```
-CD4+ T specific peaks were significantly enriched for TCF motifs
-```{r}
-# get marker peaks
-markerPeaks <- getMarkerFeatures(
-    ArchRProj = proj[proj@cellColData$Tissue == "Lung",], 
-    useMatrix = "PeakMatrix", 
-    groupBy = "PredCellType",
-    useGroups = "CD4_T",
-    bgdGroups = "Memory_B",
-    bias = c("TSSEnrichment", "log10(nFrags)"),
-    testMethod = "wilcoxon"
-)
-
-motifsUp <- peakAnnoEnrichment(
-    seMarker = markerPeaks,
-    ArchRProj = proj,
-    peakAnnotation = "Motif",
-    cutOff = "FDR <= 0.1 & Log2FC >= 0.5"
-  )
-
-df <- data.frame(TF = rownames(motifsUp), mlog10Padj = assay(motifsUp)[,1])
-df <- df[order(df$mlog10Padj, decreasing = TRUE),]
-df$rank <- seq_len(nrow(df))
-ggUp <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
-  geom_point(size = 1) +
-  ggrepel::geom_label_repel(
-        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
-        size = 1.5,
-        nudge_x = 2,
-        color = "black"
-  ) + theme_ArchR() + 
-  ylab("-log10(P-adj) Motif Enrichment") + 
-  xlab("Rank Sorted TFs Enriched") +
-  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
-
-ggUp
-```
-```{r}
-
-```
-
-
-```{r}
-compute_enrichment <- function(positives, bkg_genes, risk_genes) {
-  positive_prop = length(intersect(risk_genes, positives)) / length(positives)
-  negatives = setdiff(bkg_genes, positives)
-  negative_prop = length(intersect(risk_genes, negatives)) / length(negatives)
-  return(positive_prop / negative_prop)
-}
-```
-
-### Enrichment test for asthma genes
-
-```{r}
-asthma_genes <- read.table("../data/asthma_risk_genes_two_studies.txt", header = T)
-asthma_genes <- asthma_genes$x
-
-
-f <- read.csv("../analysis/dictys/sparsity0.015/CD4_T_CD8_T_DE_DR_logFC.txt", row.names = 1)
-
-posTFs <-
-    f %>% mutate(
-          tf_name = rownames(f),
-          mean_logFC = apply(f, 1, mean)) %>%
-          filter(DE_logFC > 0 & DR_logFC > 0) %>%
-          arrange(desc(mean_logFC)) %>% 
-      slice_head(n = 50) %>%
-      pull(tf_name)
-  
-enrich_out <-
-  lapply(target_list$`0.015`$L_CD4_T[posTFs], function(i){
-    EnrichmentTest(i,
-                   intersect(asthma_genes, all_genes$Th17),
-                   all_genes$Th17)
-  })
-
-enrich_out <- do.call(rbind, enrich_out)
-enrich_out$FDR <- p.adjust(enrich_out$p_value, method = "fdr")
-```
-
-### Enrichment test for DE genes
-
-```{r}
-deg <- readRDS("~/projects/lung_immune_fine_mapping/output/DE_analysis_wilcox/CD4_CD8_T_DE_results.RDS")
-deg_out <- 
-  deg %>% mutate(genes = rownames(deg)) %>%
-    filter(p_val_adj <= 0.05 & avg_log2FC >= 0.58) %>%
-    pull(genes)
-
-enrich_out <-
-  lapply(target_list$`0.015`$L_CD4_T[posTFs], function(i){
-    EnrichmentTest(i,
-                   intersect(deg_out, all_genes$CD4_T),
-                   all_genes$CD4_T)
-  })
-
-enrich_out <- do.call(rbind, enrich_out)
-enrich_out$FDR <- format(p.adjust(enrich_out$p_value, method = "fdr"), 
-                         scientific = TRUE, digits = 2)
-tf_regulators <-
-  enrich_out %>% 
-    mutate(gene = rownames(enrich_out),
-           FDR = p.adjust(enrich_out$p_value, method = "fdr")) %>%
-    
-    arrange(FDR) %>% filter(FDR <= 0.1) %>%
-    mutate(FDR = format(FDR, scientific = TRUE, digits = 2)) %>%
-    pull(gene)
-
-write.table(
-  data.frame(c(unique(unlist(target_list$L_Memory_B$MEF2B)), "MEF2B")),
-  "../output/MEF2B_targets_L_MemB.txt", quote = F, row.names = F)
-
-for(i in tf_regulators){
-  write.table(
-  data.frame(c(unique(unlist(target_list$L_Memory_B[i])), i)),
-  sprintf("../output/%s_targets_L_MemB.txt", i), quote = F, row.names = F)
-}
-```
-
-## T cell regulatory networks for asthma
-
-joint T cells
-
-```{r}
-f <- read.csv("../analysis/dictys/CD4_T_Th17_DE_DR_logFC.txt", row.names = 1)
-Th17_posTFs <-
-    f %>% mutate(
-        tf_name = rownames(f),
-        mean_logFC = apply(f, 1, mean)) %>%
-    arrange(desc(DR_logFC)) %>% filter(DR_logFC >= 2.5) %>%
-  pull(tf_name)
-
-enrich_out <-
-  lapply(target_list$L_Th17[posTFs], function(i){
-    EnrichmentTest(i,
-                   intersect(asthma_genes, all_genes$Th17),
-                   all_genes$Th17)
-  })
-enrich_out <- do.call(rbind, enrich_out)
-enrich_out$FDR <- format(p.adjust(enrich_out$p_value, method = "fdr"), 
-                         scientific = TRUE, digits = 2)
-summary_out <- 
-  enrich_out %>% 
-      mutate(gene = rownames(enrich_out),
-             FDR = p.adjust(enrich_out$p_value, method = "fdr")) %>%
-      
-      arrange(FDR) %>% filter(FDR <= 0.1) %>%
-      mutate(FDR = format(FDR, scientific = TRUE, digits = 2),
-             CellType = "Th17") 
-
-f <- read.csv("../analysis/dictys/CD4_T_Treg_DE_DR_logFC.txt", row.names = 1)
-CD4T_posTFs <-
-    f %>% mutate(
-        tf_name = rownames(f),
-        mean_logFC = apply(f, 1, mean)) %>%
-    arrange(desc(DR_logFC)) %>% filter(DR_logFC <= -2.5) %>%
-  pull(tf_name)
-
-enrich_out <-
-  lapply(target_list$L_CD4_T[CD4T_posTFs], function(i){
-    EnrichmentTest(i,
-                   intersect(asthma_genes, all_genes$CD4_T),
-                   all_genes$Treg)
-  })
-
-enrich_out <- do.call(rbind, enrich_out)
-enrich_out$FDR <- format(p.adjust(enrich_out$p_value, method = "fdr"), 
-                         scientific = TRUE, digits = 2)
-summary_out <- rbind(summary_out,
-  enrich_out %>% 
-      mutate(gene = rownames(enrich_out),
-             FDR = p.adjust(enrich_out$p_value, method = "fdr")) %>%
-      arrange(FDR) %>% filter(FDR <= 0.1) %>%
-      mutate(FDR = format(FDR, scientific = TRUE, digits = 2),
-             CellType = "CD4_T") 
-)
-```
-
-Identifying TF hubs for asthma genes enriched networks
-
-```{r}
-tf_asthma <- list()
-for(i in summary_out$gene){
-  if(i %in% c("STAT1")){
-    tf_asthma[[paste0("Th17_", i)]] <-
-      intersect(target_list$L_Th17[[i]], asthma_genes)
-  }else{
-    tf_asthma[[paste0("CD4T_", i)]] <-
-      intersect(target_list$L_CD4_T[[i]], asthma_genes)
-  }
-}
-
-target_list$L_CD4_T[summary_out$gene[-2:-1]]
-```
-
-### Connections with cell-type specific CREs
-
-```{r}
-tfs_LRRC32 <- lapply(names(target_list)[1:6], function(i){
-  names(target_list[[i]])[
-    unlist(lapply(target_list[[i]], function(j){ "LRRC32" %in% j }))]
-})
-names(tfs_LRRC32) <- names(target_list)[1:6]
-tfs_CCR4 <- lapply(names(target_list)[1:6], function(i){
-  names(target_list[[i]])[
-    unlist(lapply(target_list[[i]], function(j){ "CCR4" %in% j }))]
-})
-names(tfs_CCR4) <- names(target_list)[1:6]
-tf_TGFB1 <- names(target_list$L_Treg)[unlist(lapply(target_list$L_Treg, function(i){"TGFB1" %in% i}))]
-
-tfs_CCL20 <- lapply(names(target_list)[1:6], function(i){
-  names(target_list[[i]])[
-    unlist(lapply(target_list[[i]], function(j){ "CCL20" %in% j }))]
-})
-names(tfs_CCL20) <- names(target_list)[1:6]
-```
-
-```{r}
-intersect(unique(prioritized), unlist(lapply(grn_list, function(i){i$V1})))
-```
-
-## Motif analysis
-
-```{r}
-pSet <- getPeakSet(ArchRProj = proj)
-pSet$name <- paste(seqnames(pSet), start(pSet), end(pSet), sep = "_")
-matches <- getMatches(ArchRProj = proj, name = "Motif")
-rownames(matches) <- paste(seqnames(matches), start(matches), end(matches), sep = "_")
-matches <- matches[pSet$name]
-
-# get annotated motifs for promoters of EGR2
-gr <- GRanges(seqnames = c("chr10"), ranges = IRanges(start = c(62614964), end = c(62856226)))
-queryHits <- queryHits(findOverlaps(query = pSet, subject = gr_links , type = "within"))
-queryHits <- gr_peaks_sub$peakID[which(gr_peaks_sub$nearestGene == "CCL20")]
-motif_list <-
-  lapply(1:length(queryHits), function(i){
-    colnames(matches)[which(assay(matches[queryHits,])[i,])]
-  })
-
-CRE_motifs <- lapply(motif_list, function(i) {
-  tf_motifs = unlist(lapply(i, function(j){strsplit(j, "_")[[1]][1]}))
-  return(intersect(tf_motifs, as.character(unlist(tfs_CCL20))))
-})
-
-CRE_motifs
-
-
-```
-
-### regulatory marker TFs
-
-criteria: sparsity = 0.015
-
-```{r}
-target_list <- list()
-for(i in names(grn_list)){
-  # targets for regulatory TFs
-  regTF_idx = which(grn_list[[i]]$V1 %in% f$RegMarker[f$CellType == paste0("L_", i)])
-  regTF_targets <-
-    unlist(apply(grn_list[[i]][regTF_idx, -1], 1, function(j){names(j)[j == TRUE]}))
-  # targets for shared TFs
-  common_idx = which(!(grn_list[[i]]$V1 %in% f$RegMarker[f$CellType == paste0("L_", i)]))
-  common_targets <-
-    unlist(apply(grn_list[[i]][common_idx, -1], 1, function(j){names(j)[j == TRUE]}))
-  target_list[[i]] <-
-    list(regTF_targets = unique(regTF_targets),
-         common_targets = unique(common_targets),
-         all_targets = union(regTF_targets, common_targets))
-}
-
-summary <- 
-  t(sapply(names(target_list), function(i){
-    EnrichmentTest(target_list[[i]]$regTF_targets, 
-                   intersect(asthma_genes, 
-                             target_list[[i]]$all_targets), 
-                   target_list[[i]]$all_targets)
-  }))
-
-```
-
-## Enrichment test for lung up-regulated genes
-
-### CD4_T positive regulatory TFs
-
-```{r}
-select_ct = c("CD8_T", "CD4_T", "Memory_B", "Naive_B")
-diff_list <-
-  lapply(select_ct, function(i){
-    f <- read.csv(sprintf("../analysis/dictys/%s_cross_tissue_DE_DR_logFC.txt", i), 
-                    row.names = 1)
-    f %>% mutate(
-      tf_name = rownames(f),
-      mean_logFC = apply(f, 1, mean)) %>%
-      arrange(desc(mean_logFC))
-  })
-names(diff_list) <- select_ct
-target_list <-
-  lapply(select_ct, function(i) {
-    f <- fread(sprintf("../analysis/dictys/L_%s_GRN.txt", i))
-    f_pos <- f[f$Strength > 0, ]
-    return(lapply(split(f_pos, f_pos$Regulator), function(i){i$Target}))
-})
-names(target_list) <- select_ct
-posTF <- diff_list$CD4_T$tf_name
-posTF_targets <- lapply(posTF, function(i){target_list$CD4_T[[i]]})
-names(posTF_targets) <- posTF
-# list all genes in networks
-all_genes <- union(colnames(grn_list$CD4_T), grn_list$CD4_T$V1)
-lungUp <- lapply(split(sub_DGE, sub_DGE$cluster), function(i){
-  i$gene[i$group == "Lung Up-regulated"]
-})
-
-summary <- 
-  t(sapply(posTF_targets, function(i){
-    EnrichmentTest(i, 
-                   intersect(lungUp$CD4_T, all_genes),
-                   all_genes)
-  }))
-
-data.frame(summary)
-
-df <- data.frame(pval = -log10(as.numeric(unlist(summary[, 1]))),
-                 odds_ratio = unlist(summary[, 2]),
-                 mean_logFC = diff_list$CD4_T$mean_logFC,
-                 DE_logFC = diff_list$CD4_T$DE_logFC,
-                 label = rownames(summary))
-
-View(df %>% arrange(desc(odds_ratio)))
-```
-
-```{r fig.width = 14, fig.height = 7}
-ggplot(df %>% 
-         mutate(lung_up = factor(DE_logFC >0, levels = c(TRUE, FALSE))), 
-       aes(y = pval,
-               x = mean_logFC,#1:nrow(df)/nrow(df),
-               label = ifelse(pval > 2.5, label, ""),
-               color = lung_up)) +
-  geom_point() + ylab("-log(P)") + 
-  #geom_abline(slope = 1) + 
-  geom_text(nudge_y = 0.5) + ggtitle("Enrichment test for lung-up genes") + 
-  theme_ArchR(baseSize = 15, legendTextSize = 15, legendPosition = "right")
-```
-
-### test whether motif enriched in promoters of HIC2-target genes that are lung up-regulated?
-
-```{r}
-FOXO4_targets <- intersect(lungUp$CD4_T, posTF_targets$FOXO4)
-HIC2_targets <- intersect(lungUp$CD4_T, posTF_targets$HIC2)
-HSF1_targets <- intersect(lungUp$CD4_T, posTF_targets$HSF1)
-targets <- intersect(lungUp$CD4_T, posTF_targets$FOXO4)
-gr <- proj@geneAnnotation$genes[proj@geneAnnotation$genes$symbol %in% targets]
-queryHits <- queryHits(findOverlaps(query = pSet, subject = promoters(gr) , type = "within"))
-motif_list <-
-  lapply(1:length(queryHits), function(i){
-    colnames(matches)[which(assay(matches[queryHits,])[i,])]
-  })
-motifs <- lapply(motif_list, function(i) {
-  tf_motifs = unlist(lapply(i, function(j){strsplit(j, "_")[[1]][1]}))
-  return("FOXO4" %in% tf_motifs)
-})
-
-sum(unlist(motifs))/length(motifs)
-```
-
-### Regulatory marker genes
-
-```{r}
-target_list <- list()
-for(i in names(grn_list)){
-  # targets for regulatory TFs
-  regTF_idx = which(grn_list[[i]]$V1 %in% f$RegMarker[f$CellType == paste0("L_", i)])
-  regTF_targets <-
-    unlist(apply(grn_list[[i]][regTF_idx, -1], 1, function(j){names(j)[j == TRUE]}))
-  # targets for shared TFs
-  common_idx = which(!(grn_list[[i]]$V1 %in% f$RegMarker[f$CellType == paste0("L_", i)]))
-  common_targets <-
-    unlist(apply(grn_list[[i]][common_idx, -1], 1, function(j){names(j)[j == TRUE]}))
-  target_list[[i]] <-
-    list(regTF_targets = unique(regTF_targets),
-         common_targets = unique(common_targets),
-         all_targets = union(regTF_targets, common_targets))
-}
-
-summary <- 
-  t(sapply(names(target_list)[1:4], function(i){
-    EnrichmentTest(target_list[[i]]$regTF_targets, 
-                   intersect(lungUp[[i]], 
-                             target_list[[i]]$all_targets), 
-                   target_list[[i]]$all_targets)
-  }))
-
-View(data.frame(summary))
-```
-
-## Examining predicted enhancer target genes in GRNs
-
-```{r}
-eTargets <- unlist(lapply(rownames(p2g_mat)[toshow], function(i){strsplit(i, "_")[[1]][2]}))
-
-grn_eTargets <-
-  lapply(grn_list, function(i){
-    idx = match(eTargets, colnames(i))
-    idx = idx[!is.na(idx)]
-    return(i[, ..idx])
-  })
-
-
-CCR4_TFs <-
-  lapply(rev(ct_order)[1:3], function(i) {
-  grn_list[[i]][, 1][grn_eTargets[[i]]$CCR4 == TRUE]
-})
-names(CCR4_TFs) <- rev(ct_order)[1:3]
-
-LRRC32_TFs <-
-  lapply(ct_order[c(1,2,8)], function(i) {
-  grn_list[[i]][, 1][grn_eTargets[[i]]$LRRC32 == TRUE]
-})
-names(LRRC32_TFs) <- ct_order[c(1,2,8)]
-```
-
-```{r}
-# all asthma CRE targeted TFs included in GRNs
-eTargets <- unlist(lapply(rownames(p2g_mat), function(i){strsplit(i, "_")[[1]][2]}))
-
-f_TFs[intersect(eTargets, rownames(f_TFs)), ]
-```
-
-```{r}
-#LRRC32 in Treg sub-networks
-
-f_TFs[LRRC32_TFs$Treg$V1, ] # not specific
-apply(grn_list$CD4_T[match(LRRC32_TFs$Treg$V1, grn_list$Treg$V1), -1], 1, function(i){names(i)[i == TRUE]})
-```
-
-## Motif analysis
-
-```{r}
-library(BSgenome.Hsapiens.UCSC.hg38)
-proj <- addMotifAnnotations(ArchRProj = proj, motifSet = "cisbp", name = "Motif")
-pSet <- getPeakSet(ArchRProj = proj)
-pSet$name <- paste(seqnames(pSet), start(pSet), end(pSet), sep = "_")
-matches <- getMatches(ArchRProj = proj, name = "Motif")
-rownames(matches) <- paste(seqnames(matches), start(matches), end(matches), sep = "_")
-matches <- matches[pSet$name]
-
-# get annotated motifs for promoters of EGR2
-gr <- GRanges(seqnames = c("chr10"), ranges = IRanges(start = c(62614964), end = c(62856226)))
-queryHits <- queryHits(findOverlaps(query = pSet, subject = gr_links , type = "within"))
-queryHits <- p2g_peaks$idxATAC[which(p2g_peaks$idxRNA == gene_idx)]
-motif_list <-
-  lapply(1:length(queryHits), function(i){
-    colnames(matches)[which(assay(matches[queryHits,])[i,])]
-  })
-motifs <- lapply(motif_list, function(i) {
-  tf_motifs = unlist(lapply(i, function(j){strsplit(j, "_")[[1]][1]}))
-  return(intersect(tf_motifs, grn_EGR2$Target))
-})
-
-motifs
-```
-
-chromVAR is designed for predicting enrichment of TF activity on a per-cell basis from sparse chromatin accessibility data.
-
--   output per-cell TF motif deviation score
--   take into account insertion sequence bias of Tn5 transposase
--   "deviations" - how far the per-cell accessibility of a given motif deviates from the expected accessibility based on the average
--   "z-scores" - absolute deviation score normalized by read depth
-
-```{r}
-# compute ChromVAR deviations
-proj <- addBgdPeaks(proj, force = TRUE)
-proj <- addDeviationsMatrix(
-  ArchRProj = proj, 
-  peakAnnotation = "Motif",
-  force = TRUE
-)
-
-plotVarDev <- getVarDeviations(proj, name = "MotifMatrix", plot = TRUE)
-saveArchRProject(proj)
-```
-
-### Identify resources to annotate highlighted asthma CREs
-
--   TF motifs contained in each CRE
-
-    -   no motifs of TFs targeting LRRC32 in GRNs were found in the CREs
-    -   only motif of PURA weakly linked to CCR4 in GRNs were found in the CREs.
-
-    ```{r}
-    LRRC32_TFs <- fread("../analysis/dictys/LRRC32_linked_TFs.txt")
-    CCR4_TFs <- fread("../analysis/dictys/CCR4_linked_TFs_Th17.txt")
-    queryHits <- gr_peaks_sub$peakID[which(gr_peaks_sub$nearestGene == "CCR4")]
-    motif_list <-
-      lapply(1:length(queryHits), function(i){
-        colnames(matches)[which(assay(matches[queryHits,])[i,])]
-      })
-    motifs <- lapply(motif_list, function(i) {
-      tf_motifs = unlist(lapply(i, function(j){strsplit(j, "_")[[1]][1]}))
-      return(intersect(tf_motifs, CCR4_TFs$Regulator))
-    })
-
-    motifs
-    ```
-
-    ```{r}
-    seGroupMotif <- getGroupSE(ArchRProj = proj, useMatrix = "MotifMatrix", groupBy = "PredCellType")
-    corGSM_MM <- correlateMatrices(
-        ArchRProj = proj,
-        useMatrix1 = "GeneScoreMatrix",
-        useMatrix2 = "MotifMatrix",
-        reducedDims = "IterativeLSI"
-    )
-
-    motif_matrix <- getMatrixFromProject(proj, useMatrix = "MotifMatrix")
-    motifs <- c("GATA1", "CEBPA", "EBF1", "IRF4", "TBX21", "PAX5")
-    markerMotifs <- getFeatures(proj, select = paste(motifs, collapse="|"), useMatrix = "MotifMatrix")
-    markerMotifs
-
-    plotVarDev <- getVarDeviations(proj, name = "MotifMatrix", plot = TRUE)
-    ```
